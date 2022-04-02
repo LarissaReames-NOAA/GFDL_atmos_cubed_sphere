@@ -53,6 +53,7 @@ module nh_utils_mod
    use tp_core_mod,       only: fv_tp_2d
    use sw_core_mod,       only: fill_4corners, del6_vt_flux
    use fv_arrays_mod,     only: fv_grid_bounds_type, fv_grid_type,fv_nest_BC_type_3d
+   use fv_mp_mod,         only: is_master
 #ifdef MULTI_GASES
    use multi_gases_mod,  only:  vicpqd, vicvqd
 #endif
@@ -342,10 +343,11 @@ CONTAINS
                            kapad, &
 #endif
                            ptop, hs, w3,  pt, q_con, &
-                           delp, gz,  pef,  ws, p_fac, a_imp, scale_m)
+                           delp, gz,  pef,  ws, p_fac, a_imp, scale_m,simpson)
 
    integer, intent(in):: is, ie, js, je, ng, km
    integer, intent(in):: ms
+   logical, intent(in)::simpson
    real, intent(in):: dt,  akap, cp, ptop, p_fac, a_imp, scale_m
    real, intent(in):: ws(is-ng:ie+ng,js-ng:je+ng)
    real, intent(in), dimension(is-ng:ie+ng,js-ng:je+ng,km):: pt, delp
@@ -379,7 +381,7 @@ CONTAINS
 !$OMP                                  a_imp,dt,gama,akap,ws,p_fac,scale_m,ms,hs,q_con,cappa,kapad) &
 !$OMP                          private(cp2,gm2, dm, dz2, w2, pm2, pe2, pem, peg, kapad2)
 #else
-!$OMP                                  a_imp,dt,gama,akap,ws,p_fac,scale_m,ms,hs,q_con,cappa) &
+!$OMP                                simpson,a_imp,dt,gama,akap,ws,p_fac,scale_m,ms,hs,q_con,cappa) &
 !$OMP                          private(cp2,gm2, dm, dz2, w2, pm2, pe2, pem, peg)
 #endif
    do 2000 j=js-1, je+1
@@ -451,7 +453,7 @@ CONTAINS
                             kapad2, &
 #endif
                             pe2,  &
-                            dm, pm2, pem, w2, dz2, pt(is1:ie1,j,1:km), ws(is1,j), p_fac)
+                            dm, pm2, pem, w2, dz2, pt(is1:ie1,j,1:km), ws(is1,j), p_fac,simpson,j)
       endif
 
       do k=2,km+1
@@ -486,7 +488,7 @@ CONTAINS
                           ptop, zs, q_con, w,  delz, pt,  &
                           delp, zh, pe, ppe, pk3, pk, peln, &
                           ws, scale_m,  p_fac, a_imp, &
-                          use_logp, last_call, fp_out)
+                          use_logp, last_call, fp_out,simpson)
 !--------------------------------------------
 ! !OUTPUT PARAMETERS
 ! Ouput: gz: grav*height at edges
@@ -495,6 +497,7 @@ CONTAINS
 !--------------------------------------------
    integer, intent(in):: ms, is, ie, js, je, km, ng
    integer, intent(in):: isd, ied, jsd, jed
+   logical, intent(in):: simpson
    real, intent(in):: dt         ! the BIG horizontal Lagrangian time step
    real, intent(in):: akap, cp, ptop, p_fac, a_imp, scale_m
    real, intent(in):: zs(isd:ied,jsd:jed)
@@ -528,7 +531,7 @@ CONTAINS
      ptk = exp(akap*peln1)
 
 !$OMP parallel do default(none) shared(is,ie,js,je,km,delp,ptop,peln1,pk3,ptk,akap,rgrav,zh,pt, &
-!$OMP                                  w,a_imp,dt,gama,ws,p_fac,scale_m,ms,delz,last_call,  &
+!$OMP                                    simpson,w,a_imp,dt,gama,ws,p_fac,scale_m,ms,delz,last_call,  &
 #ifdef MULTI_GASES
 !$OMP                                  peln,pk,fp_out,ppe,use_logp,zs,pe,cappa,q_con,kapad )          &
 !$OMP                          private(cp2, gm2, dm, dz2, pm2, pem, peg, pelng, pe2, peln2, w2,kapad2)
@@ -618,7 +621,7 @@ CONTAINS
                             kapad2, &
 #endif
                             pe2, dm,   &
-                            pm2, pem, w2, dz2, pt(is:ie,j,1:km), ws(is,j), p_fac)
+                            pm2, pem, w2, dz2, pt(is:ie,j,1:km), ws(is,j), p_fac,simpson)
       else
            call SIM_solver(dt, is, ie, km, rdgas, gama, gm2, cp2, akap, &
 #ifdef MULTI_GASES
@@ -1381,8 +1384,9 @@ CONTAINS
                         kapad2, &
 #endif
                         pe, dm2,   &
-                        pm2, pem, w2, dz2, pt2, ws, p_fac)
+                        pm2, pem, w2, dz2, pt2, ws, p_fac, simpson, jslice)
    integer, intent(in):: is, ie, km
+   integer, intent(in), optional :: jslice
    real,    intent(in):: dt, rgas, gama, kappa, p_fac
    real, intent(in), dimension(is:ie,km):: dm2, pt2, pm2, gm2, cp2
    real, intent(in )::  ws(is:ie)
@@ -1394,14 +1398,20 @@ CONTAINS
 #endif
 ! Local
    real, dimension(is:ie,km  ):: aa, bb, dd, w1, g_rat, gam
-   real, dimension(is:ie,km+1):: pp
+   real, dimension(is:ie,km+1):: pp, pptest
    real, dimension(is:ie):: p1, bet
    real t1g, rdt, capa1
+
+!
+   real:: hph, hdh, hmh, dmup, dmdn, dmcn
+   real:: dwup, dwcn, dwdn, dmtot, wup, wdn, wcn, dzup, dzdn, dzcn, ddmup, ddmcn, ddmdn
+!
+
+   logical, intent(in) :: simpson 
 #ifdef MULTI_GASES
    real  gamax, capa1x, t1gx
 #endif
    integer i, k
-
 #ifdef MOIST_CAPPA
       t1g = 2.*dt*dt
 #else
@@ -1426,6 +1436,8 @@ CONTAINS
        enddo
     enddo
 
+! Set up tridiagonal coeffs for cubic spline interpolation
+
     do k=1,km-1
        do i=is, ie
           g_rat(i,k) = dm2(i,k)/dm2(i,k+1)
@@ -1442,6 +1454,8 @@ CONTAINS
        dd(i,km) = 3.*pe(i,km)
     enddo
 
+! Forward calculation of tri-diagonal system
+
     do k=2,km
       do i=is, ie
           gam(i,k) =  g_rat(i,k-1) / bet(i)
@@ -1450,32 +1464,36 @@ CONTAINS
       enddo
     enddo
 
+! Do the back substition, result is pp on zone edges.
+
     do k=km, 2, -1
        do i=is, ie
           pp(i,k) = pp(i,k) - gam(i,k)*pp(i,k+1)
        enddo
     enddo
 
-! Start the w-solver
+! Start the w-solver - aa is the 2*dt**2*gamma*p_full / dz
+
     do k=2, km
        do i=is, ie
+
 #ifdef MOIST_CAPPA
           aa(i,k) = t1g*0.5*(gm2(i,k-1)+gm2(i,k))/(dz2(i,k-1)+dz2(i,k)) * (pem(i,k)+pp(i,k))
 #else
-#ifdef MULTI_GASES
-          gamax = 1./(1.-kapad2(i,k))
-          t1gx = gamax * 2.*dt*dt
-          aa(i,k) = t1gx/(dz2(i,k-1)+dz2(i,k)) * (pem(i,k)+pp(i,k))
-#else
           aa(i,k) = t1g/(dz2(i,k-1)+dz2(i,k)) * (pem(i,k)+pp(i,k))
-#endif
 #endif
        enddo
     enddo
+
+! Boundary value calc for forward tri-diagonal solution
+
     do i=is, ie
        bet(i)  = dm2(i,1) - aa(i,2)
        w2(i,1) = (dm2(i,1)*w1(i,1) + dt*pp(i,2)) / bet(i)
     enddo
+
+! Forward tri-diagonal solution
+
     do k=2,km-1
        do i=is, ie
           gam(i,k) = aa(i,k) / bet(i)
@@ -1483,48 +1501,147 @@ CONTAINS
            w2(i,k) = (dm2(i,k)*w1(i,k)+dt*(pp(i,k+1)-pp(i,k))-aa(i,k)*w2(i,k-1)) / bet(i)
        enddo
     enddo
+
+! Boundary calc at bottom of grid for solution of w
+
     do i=is, ie
 #ifdef MOIST_CAPPA
-           p1(i) = t1g*gm2(i,km)/dz2(i,km)*(pem(i,km+1)+pp(i,km+1))
+       p1(i) = t1g*gm2(i,km)/dz2(i,km)*(pem(i,km+1)+pp(i,km+1))
 #else
-#ifdef MULTI_GASES
-           gamax = 1./(1.-kapad2(i,km))
-           t1gx = gamax * 2.*dt*dt
-           p1(i) = t1gx/dz2(i,km)*(pem(i,km+1)+pp(i,km+1))
-#else
-           p1(i) = t1g/dz2(i,km)*(pem(i,km+1)+pp(i,km+1))
-#endif
+       p1(i) = t1g/dz2(i,km)*(pem(i,km+1)+pp(i,km+1))
 #endif
        gam(i,km) = aa(i,km) / bet(i)
           bet(i) =  dm2(i,km) - (aa(i,km)+p1(i) + aa(i,km)*gam(i,km))
         w2(i,km) = (dm2(i,km)*w1(i,km)+dt*(pp(i,km+1)-pp(i,km))-p1(i)*ws(i)-aa(i,km)*w2(i,km-1))/bet(i)
     enddo
+
+! Do the back substition, result is newly updated w in center of zone
+
     do k=km-1, 1, -1
        do i=is, ie
           w2(i,k) = w2(i,k) - gam(i,k+1)*w2(i,k+1)
        enddo
     enddo
 
+! Next code is to vertically integrate p' starting from top bc (p' = 0) downward
+! using w-tendency.
+
     do i=is, ie
        pe(i,1) = 0.
     enddo
-    do k=1,km
-       do i=is, ie
+
+    IF( .not. simpson ) THEN
+      if(is_master()) print*, "ORIG COMP"
+      do k=1,km
+        do i=is, ie
           pe(i,k+1) = pe(i,k) + dm2(i,k)*(w2(i,k)-w1(i,k))*rdt
+        enddo
+      enddo
+
+    ELSE   ! use simpsons rule to integrate downward
+
+    ! First, approximate the km edge with midpoint rule (what is normally used)
+
+!      do i=is, ie
+!        pe(i,2) = pe(i,1) + dm2(i,1)*(w2(i,1)-w1(i,1))*rdt
+!        pe(i,3) = pe(i,2) + dm2(i,2)*(w2(i,2)-w1(i,2))*rdt
+      enddo
+!
+!    ! Next, do the interior of the grid to km - 1 using simpson's rule
+!
+!      do k=2,km-1
+!        do i=is, ie
+!
+!          dmup = -0.5*(dz2(i,k-1)+dz2(i,k))
+!          dmdn = -0.5*(dz2(i,k+1)+dz2(i,k))
+!          hph = dmup + dmdn
+!          hdh = dmup / dmdn
+!          hmh = dmup * dmdn
+!          dwup = dm2(i,k-1)*(w2(i,k-1)-w1(i,k-1))
+!          dwcn = dm2(i,k  )*(w2(i,k  )-w1(i,k  ))
+!          dwdn = dm2(i,k+1)*(w2(i,k+1)-w1(i,k+1))
+!          pe(i,k+1) = pe(i,k) + rdt*(hph/12.0)*((2.0-hdh)*dwup + (hph**2/hmh)*dwcn + (2.0-1.0/hdh)*dwdn)
+!      
+!        enddo
+!      enddo
+
+      do k=2,km
+         do i=is, ie
+ 
+           dzup = dz2(i,k-1)
+           dzdn = dz2(i,k)
+           dzcn = dz2(i,k+1)
+ 
+           dmup = dzcn + 0.5*(dzup+dzdn)
+           dmcn = 0.5 * (dzcn+dzdn)
+           dmdn = 0.0
+ 
+           ddmup = dmcn-dmup
+           ddmdn = dmdn-dmcn
+           ddmcn = dmdn-dmup
+ 
+            wup = dm2(i,k-1) *(w2(i,k-1)-w1(i,k-1))
+            wcn = dm2(i,k) *(w2(i,k)-w1(i,k))
+            wdn = dm2(i,k+1) * (w2(i,k+1)-w1(i,k+1))
+            dwup = wcn-wup
+            dwdn = wdn-wcn
+
+            pe(i,k+1) = pe(i,k) + 1.0/abs(dmup) * rdt* &
+                         (wup*ddmcn+(ddmcn**2/2.)*dwup/ddmup+ &
+                         0.5*(dwdn/ddmdn-dwup/ddmup)/ddmcn*(ddmcn*ddmdn**2-(1./3.)*ddmdn**3+(1./3.)*(-ddmup)**3))
+          enddo
+        enddo
+ 
+     ! Finally, do the bottom pressure using midpoint rule
+ 
+       do i=is, ie
+         pe(i,km+1) = pe(i,km) + dm2(i,km)*(w2(i,km)-w1(i,km))*rdt
        enddo
-    enddo
+ 
+    ENDIF
+
+! This code updates the p' using the vertical divergence centered on zone edge.
+
+! set top bc condition
+
+!    do i=is, ie
+!       pptest(i,1) = 0.
+!    enddo
+!
+!! Do column down to near the ground
+!
+!    do k=2,km
+!       do i=is, ie
+!          aa(i,k)     = dt*(gm2(i,k-1)+gm2(i,k))/(dz2(i,k-1)+dz2(i,k)) * (pem(i,k)+pp(i,k))
+!          pptest(i,k) = pp(i,k) - aa(i,k)*(w2(i,k-1)-w2(i,k))
+!       enddo
+!    enddo
+!
+!    do i=is, ie
+!       aa(i,km)       = dt*gm2(i,km)/dz2(i,km) * (pem(i,km+1)+pp(i,km+1))
+!       pptest(i,km+1) = pp(i,km+1) - aa(i,km)*(ws(i)-w2(i,km))
+!    enddo
+!
+!    IF(present(jslice)) THEN
+!    IF( (is .lt. 128) .and. (ie .gt. 128) .and. (jslice .eq. 128)) then
+!
+!       do k = km+1, 1, -1
+!          write(66,*), k, pe(128,k), pptest(128,k)
+!       enddo
+!
+!    ENDIF
+!    ENDIF
+
+! 
+
+! Recompute p' at center of the zones.
 
     do i=is, ie
            p1(i) = ( pe(i,km) + 2.*pe(i,km+1) )*r3
 #ifdef MOIST_CAPPA
        dz2(i,km) = -dm2(i,km)*rgas*pt2(i,km)*exp((cp2(i,km)-1.)*log(max(p_fac*pm2(i,km),p1(i)+pm2(i,km))))
 #else
-#ifdef MULTI_GASES
-       capa1x = kapad2(i,km)-1.
-       dz2(i,km) = -dm2(i,km)*rgas*pt2(i,km)*exp(capa1x*log(max(p_fac*pm2(i,km),p1(i)+pm2(i,km))))
-#else
        dz2(i,km) = -dm2(i,km)*rgas*pt2(i,km)*exp(capa1*log(max(p_fac*pm2(i,km),p1(i)+pm2(i,km))))
-#endif
 #endif
     enddo
 

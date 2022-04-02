@@ -540,6 +540,7 @@ module fv_arrays_mod
                                   !< of the Exner function (as in \cite lin1997explicit). This yields
                                   !< more accurate results for regions that are nearly isothermal.
                                   !< Ignored if 'hydrostatic' = .true. The default is .false.
+   logical :: simpson = .false.   !LJR
 
 !            For doubly periodic domain with sim_phys
 !                     5km        150         20 (7.5 s)  2

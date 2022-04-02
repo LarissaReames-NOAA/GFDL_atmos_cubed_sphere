@@ -284,6 +284,7 @@ contains
     real    :: reg_bc_update_time
     logical :: last_step, remap_step
     logical used
+    logical ::simpson
     real :: split_timestep_bc
 
     integer :: is,  ie,  js,  je
@@ -308,6 +309,7 @@ contains
     dt2 = 0.5*dt
     rdt = 1.0/dt
     ms = max(1, flagstruct%m_split/2)
+    simpson = flagstruct%simpson
     beta = flagstruct%beta
     rdg = -rdgas / grav
     cv_air = cp_air - rdgas
@@ -629,7 +631,7 @@ contains
 #endif
                                ptop, phis, omga, ptc,  &
                                q_con,  delpc, gz,  pkc, ws3, flagstruct%p_fac, &
-                                flagstruct%a_imp, flagstruct%scale_z )
+                                flagstruct%a_imp, flagstruct%scale_z,simpson )
                                                call timing_off('Riem_Solver')
 
            if (gridstruct%nested) then
@@ -1047,7 +1049,7 @@ contains
                          ptop, zs, q_con, w, delz, pt, delp, zh,   &
                          pe, pkc, pk3, pk, peln, ws, &
                          flagstruct%scale_z, flagstruct%p_fac, flagstruct%a_imp, &
-                         flagstruct%use_logp, remap_step, beta<-0.1)
+                         flagstruct%use_logp, remap_step, beta<-0.1,simpson)
                                                          call timing_off('Riem_Solver')
 
                                        call timing_on('COMM_TOTAL')
