@@ -2890,11 +2890,6 @@ subroutine SIM_W_1D(dt, is,ie,km, rgas, gama, gm2, cp2, kappa, pe, dm2, pm2, pem
     enddo    
     enddo
     
-! Validated the wE here.
-    do i = is,ie 
-      wES(i,1:km+1) = wE(i,1:km+1)
-    enddo
-    
 ! Compute cell centered tridiagonal coefficients 
 
     do k = 1, km
@@ -2915,7 +2910,7 @@ subroutine SIM_W_1D(dt, is,ie,km, rgas, gama, gm2, cp2, kappa, pe, dm2, pm2, pem
         
       Ck(i,k) = aa(i,k)*cc(i,k)
     
-      Rk(i,k) = wE(i,k) + cc(i,k) * (wE(i,k) - wE(i,k-1))
+      Rk(i,k) = wE(i,k) + cc(i,k) * (pe(i,k) - pe(i,k-1))
     enddo
     enddo    
 
@@ -2998,7 +2993,6 @@ subroutine SIM_W_1D(dt, is,ie,km, rgas, gama, gm2, cp2, kappa, pe, dm2, pm2, pem
        do k = 1,km
           write(97,*), k, pp(128,k), pm2(128,k)
           write(98,*), w2(128,k), dz2(128,k), dm2(128,k)
-          write(99,*), pt2(128,k), gm2(128,k), cp2(128,k)
        enddo
        do k = 1,km+1
           write(100,*), pe(128,k), wE(128,k)
