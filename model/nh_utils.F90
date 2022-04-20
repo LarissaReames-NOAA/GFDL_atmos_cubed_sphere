@@ -54,6 +54,7 @@ module nh_utils_mod
    use sw_core_mod,       only: fill_4corners, del6_vt_flux
    use fv_arrays_mod,     only: fv_grid_bounds_type, fv_grid_type,fv_nest_BC_type_3d
    use fv_mp_mod,         only: is_master
+   use fv_mapz_mod,        only: weno5_profile
 #ifdef MULTI_GASES
    use multi_gases_mod,  only:  vicpqd, vicvqd
 #endif
@@ -64,7 +65,8 @@ module nh_utils_mod
    public update_dz_c, update_dz_d, nh_bc
    public sim_solver, sim1_solver, sim3_solver
    public sim3p0_solver, rim_2d
-   public Riem_Solver_c
+   public Riem_Solver_c,simc_solver
+   public sim_w_1d
 
    real, parameter:: r3 = 1./3.
 
@@ -343,11 +345,11 @@ CONTAINS
                            kapad, &
 #endif
                            ptop, hs, w3,  pt, q_con, &
-                           delp, gz,  pef,  ws, p_fac, a_imp, scale_m,simpson)
+                           delp, gz,  pef,  ws, p_fac, a_imp,scale_m,simpson,t,it,init_step)
 
-   integer, intent(in):: is, ie, js, je, ng, km
-   integer, intent(in):: ms
-   logical, intent(in)::simpson
+   integer, intent(in):: is, ie, js, je, ng, km,it
+   integer, intent(in):: ms, t
+   logical, intent(in)::simpson,init_step
    real, intent(in):: dt,  akap, cp, ptop, p_fac, a_imp, scale_m
    real, intent(in):: ws(is-ng:ie+ng,js-ng:je+ng)
    real, intent(in), dimension(is-ng:ie+ng,js-ng:je+ng,km):: pt, delp
@@ -376,7 +378,7 @@ CONTAINS
    is1 = is - 1
    ie1 = ie + 1
 
-!$OMP parallel do default(none) shared(js,je,is1,ie1,km,delp,pef,ptop,gz,rgrav,w3,pt, &
+!$OMP parallel do default(none) shared(js,je,is1,ie1,km,delp,pef,ptop,gz,rgrav,w3,pt,t,it,init_step, &
 #ifdef MULTI_GASES
 !$OMP                                  a_imp,dt,gama,akap,ws,p_fac,scale_m,ms,hs,q_con,cappa,kapad) &
 !$OMP                          private(cp2,gm2, dm, dz2, w2, pm2, pe2, pem, peg, kapad2)
@@ -448,12 +450,17 @@ CONTAINS
                        pe2, &
                        dm, pm2, w2, dz2, pt(is1:ie1,j,1:km), ws(is1,j), .true.)
       else
-           call SIM1_solver(dt, is1, ie1, km, rdgas, gama, gm2, cp2, akap, &
-#ifdef MULTI_GASES
-                            kapad2, &
-#endif
-                            pe2,  &
-                            dm, pm2, pem, w2, dz2, pt(is1:ie1,j,1:km), ws(is1,j), p_fac,simpson,j)
+!        if ( .not. simpson) then
+!           call SIM1_solver(dt, is1, ie1, km, rdgas, gama, gm2, cp2, akap, &
+!#ifdef MULTI_GASES
+!                            kapad2, &
+!#endif
+!                            pe2,  &
+!                            dm, pm2, pem, w2, dz2, pt(is1:ie1,j,1:km), ws(is1,j), p_fac,simpson,j)
+!        else !dt, is,ie,km, rgas, gama, gm2, cp2, kappa, pe, dm2, pm2, pem, w2,dz2, pt2, ws, p_fac)
+          call SIM_W_1D(dt, is1, ie1, km, rdgas, gama, gm2, cp2, akap, pe2,  &
+                            dm, pm2, pem, w2, dz2, pt(is1:ie1,j,1:km),ws(is1,j), p_fac,j)
+!        endif
       endif
 
       do k=2,km+1
@@ -616,12 +623,17 @@ CONTAINS
                        pe2,   &
                        dm, pm2, w2, dz2, pt(is:ie,j,1:km), ws(is,j), .false.)
       elseif ( a_imp > 0.999 ) then
-           call SIM1_solver(dt, is, ie, km, rdgas, gama, gm2, cp2, akap, &
-#ifdef MULTI_GASES
-                            kapad2, &
-#endif
-                            pe2, dm,   &
-                            pm2, pem, w2, dz2, pt(is:ie,j,1:km), ws(is,j), p_fac,simpson)
+!        if (simpson) then
+          call SIM_W_1D(dt, is, ie, km, rdgas, gama, gm2, cp2, akap, pe2,  &
+                            dm, pm2, pem, w2, dz2, pt(is:ie,j,1:km),ws(is,j),p_fac,j)
+!        else
+!          call SIM1_solver(dt, is, ie, km, rdgas, gama, gm2, cp2, akap, &
+!#ifdef MULTI_GASES
+!                            kapad2, &
+!#endif
+!                            pe2, dm,   &
+!                            pm2, pem, w2, dz2, pt(is:ie,j,1:km), ws(is,j), p_fac,simpson)
+!        endif
       else
            call SIM_solver(dt, is, ie, km, rdgas, gama, gm2, cp2, akap, &
 #ifdef MULTI_GASES
@@ -1397,8 +1409,9 @@ CONTAINS
    real, intent(inout), dimension(is:ie,km):: kapad2
 #endif
 ! Local
-   real, dimension(is:ie,km  ):: aa, bb, dd, w1, g_rat, gam
-   real, dimension(is:ie,km+1):: pp, pptest
+   real, dimension(is:ie,km  ):: aa, bb, dd, w1,  gam,dz2_save
+   real, dimension(is:ie,0:km) :: g_rat
+   real, dimension(is:ie,km+1):: pp, pptest,we
    real, dimension(is:ie):: p1, bet
    real t1g, rdt, capa1
 
@@ -1408,6 +1421,7 @@ CONTAINS
 !
 
    logical, intent(in) :: simpson 
+   logical :: simpson2 = .false.
 #ifdef MULTI_GASES
    real  gamax, capa1x, t1gx
 #endif
@@ -1435,7 +1449,16 @@ CONTAINS
           w1(i,k) = w2(i,k)
        enddo
     enddo
-
+    IF(present(jslice)) THEN
+    IF( (is .lt. 128) .and. (ie .gt. 128) .and. (jslice .eq. 128)) then
+       do k = 1,km
+          write(01,*), k, pe(128,k), pm2(128,k)
+          write(02,*), w2(128,k), dz2(128,k), dm2(128,k)
+          write(03,*), pt2(128,k), gm2(128,k), cp2(128,k)
+       enddo
+    ENDIF
+    ENDIF
+    !Here pe is pert p valid at the grid centers, and pm2 is full pressure at grid centers
 ! Set up tridiagonal coeffs for cubic spline interpolation
 
     do k=1,km-1
@@ -1447,16 +1470,26 @@ CONTAINS
     enddo
 
     do i=is, ie
-         bet(i) = bb(i,1)
-        pp(i,1) = 0.
-        pp(i,2) = dd(i,1) / bet(i)
-       bb(i,km) = 2.
-       dd(i,km) = 3.*pe(i,km)
+!         bet(i) = bb(i,1)
+!        pp(i,1) = 0.
+!        pp(i,2) = dd(i,1) / bet(i)
+!       bb(i,km) = 2.
+!       dd(i,km) = 3.*pe(i,km)
+       bet(i) = bb(i,1)
+       dd(i, 1) = 3.*pe(i, 1)
+       g_rat(i,0) = 1.0
+       pp(i,1) = dd(i,1) / bet(i)
+       bb(i,1) = 2.0
+!       bet(i) =  bb(i,k) - gam(i,1)
+!       pp(i,2) = (dd(i,1)-pp(i,1)) / bet(i)
+!       bb(i,km) = 2.
+!       dd(i,km) = 3.*pe(i,km)
     enddo
 
 ! Forward calculation of tri-diagonal system
 
-    do k=2,km
+    !do k=2,km
+    do k = 1,km
       do i=is, ie
           gam(i,k) =  g_rat(i,k-1) / bet(i)
             bet(i) =  bb(i,k) - gam(i,k)
@@ -1466,12 +1499,20 @@ CONTAINS
 
 ! Do the back substition, result is pp on zone edges.
 
-    do k=km, 2, -1
+    !do k=km, 2, -1
+     do k = km,1,-1
        do i=is, ie
           pp(i,k) = pp(i,k) - gam(i,k)*pp(i,k+1)
        enddo
     enddo
+    IF(present(jslice)) THEN
+    IF( (is .lt. 128) .and. (ie .gt. 128) .and. (jslice .eq. 128)) then
+       do k = 1,km+1
+         write(04,*), pem(128,k), pp(128,k)
+       enddo
 
+    ENDIF
+    ENDIF
 ! Start the w-solver - aa is the 2*dt**2*gamma*p_full / dz
 
     do k=2, km
@@ -1530,8 +1571,7 @@ CONTAINS
        pe(i,1) = 0.
     enddo
 
-    IF( .not. simpson ) THEN
-      if(is_master()) print*, "ORIG COMP"
+    IF( .not. simpson2 ) THEN
       do k=1,km
         do i=is, ie
           pe(i,k+1) = pe(i,k) + dm2(i,k)*(w2(i,k)-w1(i,k))*rdt
@@ -1542,9 +1582,9 @@ CONTAINS
 
     ! First, approximate the km edge with midpoint rule (what is normally used)
 
-!      do i=is, ie
-!        pe(i,2) = pe(i,1) + dm2(i,1)*(w2(i,1)-w1(i,1))*rdt
-!        pe(i,3) = pe(i,2) + dm2(i,2)*(w2(i,2)-w1(i,2))*rdt
+      do i=is, ie
+        pe(i,2) = pe(i,1) + dm2(i,1)*(w2(i,1)-w1(i,1))*rdt
+        pe(i,3) = pe(i,2) + dm2(i,2)*(w2(i,2)-w1(i,2))*rdt
       enddo
 !
 !    ! Next, do the interior of the grid to km - 1 using simpson's rule
@@ -1565,12 +1605,12 @@ CONTAINS
 !        enddo
 !      enddo
 
-      do k=2,km
+      do k=3,km
          do i=is, ie
  
            dzup = dz2(i,k-1)
-           dzdn = dz2(i,k)
-           dzcn = dz2(i,k+1)
+           dzcn = dz2(i,k)
+           dzdn = dz2(i,k+1)
  
            dmup = dzcn + 0.5*(dzup+dzdn)
            dmcn = 0.5 * (dzcn+dzdn)
@@ -1585,7 +1625,10 @@ CONTAINS
             wdn = dm2(i,k+1) * (w2(i,k+1)-w1(i,k+1))
             dwup = wcn-wup
             dwdn = wdn-wcn
-
+            ! Simpson's 1/3 rule for uneven intervals
+            ! int[y dx] = y0(x2-x0) + (x2-x0)^2/2 * dy(1-0)/dx + 
+            !                         1/2 * (dy(2-1)/dx-dy(1-0)dx)/dx(x2-x0)*
+            !                         ((x2-x0)(x2-x1)^2-1/3(x2-x1)^3+1/3(x0-x1)^3)
             pe(i,k+1) = pe(i,k) + 1.0/abs(dmup) * rdt* &
                          (wup*ddmcn+(ddmcn**2/2.)*dwup/ddmup+ &
                          0.5*(dwdn/ddmdn-dwup/ddmup)/ddmcn*(ddmcn*ddmdn**2-(1./3.)*ddmdn**3+(1./3.)*(-ddmup)**3))
@@ -1633,11 +1676,19 @@ CONTAINS
 !    ENDIF
 
 ! 
+  do k = 1,km
+  do i = is,ie
+     dz2_save(i,k) = dz2(i,k)
+  enddo
+  enddo
+
+  call weno5_profile(we,pm2,w2,ws,is,ie,km)
 
 ! Recompute p' at center of the zones.
 
     do i=is, ie
            p1(i) = ( pe(i,km) + 2.*pe(i,km+1) )*r3
+          pp(i,km) = p1(i)
 #ifdef MOIST_CAPPA
        dz2(i,km) = -dm2(i,km)*rgas*pt2(i,km)*exp((cp2(i,km)-1.)*log(max(p_fac*pm2(i,km),p1(i)+pm2(i,km))))
 #else
@@ -1648,6 +1699,7 @@ CONTAINS
     do k=km-1, 1, -1
        do i=is, ie
           p1(i) = (pe(i,k) + bb(i,k)*pe(i,k+1) + g_rat(i,k)*pe(i,k+2))*r3 - g_rat(i,k)*p1(i)
+          pp(i,k) = p1(i)
 #ifdef MOIST_CAPPA
           dz2(i,k) = -dm2(i,k)*rgas*pt2(i,k)*exp((cp2(i,k)-1.)*log(max(p_fac*pm2(i,k),p1(i)+pm2(i,k))))
 
@@ -1662,7 +1714,296 @@ CONTAINS
        enddo
     enddo
 
+    IF(present(jslice)) THEN
+    IF( (is .lt. 128) .and. (ie .gt. 128) .and. (jslice .eq. 128)) then
+
+       do k = 1,km
+          write(97,*), k, pp(128,k), pm2(128,k)
+          write(98,*), w2(128,k), dz2(128,k), dm2(128,k)
+          write(99,*), pt2(128,k), gm2(128,k), cp2(128,k)
+       enddo
+       do k = 1,km
+          write(100,*),k, -(dz2(128,k)-dz2_save(128,k))/dt, -(we(128,k+1)-we(128,k)) 
+       enddo
+
+    ENDIF
+    ENDIF
+
  end subroutine SIM1_solver
+
+ subroutine SIMC_solver(dt,  is,  ie, km, rgas, gama, gm2, cp2, kappa, &
+#ifdef MULTI_GASES
+                        kapad2, &
+#endif
+                        pe, dm2,   &
+                        pm2, pem, w2, dz2, pt2, ws, p_fac, simpson, jslice)
+   integer, intent(in):: is, ie, km
+   integer, intent(in), optional :: jslice
+   real,    intent(in):: dt, rgas, gama, kappa, p_fac
+   real, intent(in), dimension(is:ie,km):: dm2, pt2, pm2, gm2, cp2
+   real, intent(in )::  ws(is:ie)
+   real, intent(in ), dimension(is:ie,km+1):: pem
+   real, intent(out)::  pe(is:ie,km+1)
+   real, intent(inout), dimension(is:ie,km):: dz2, w2
+   logical, intent(in) :: simpson
+#ifdef MULTI_GASES
+   real, intent(inout), dimension(is:ie,km):: kapad2
+#endif
+! Local
+   real, dimension(is:ie,km  ):: aa, bb, dd, w1, g_rat, gam,dz2_save, pp, dm2_tmp,dz2_tmp
+   real, dimension(is:ie,km+1):: we, z_old, z_new
+   real, dimension(is:ie):: p1, bet, wt
+   real, dimension(4,is:ie,km)::q4
+   real t1g, rdt, capa1
+
+#ifdef MULTI_GASES
+   real  gamax, capa1x, t1gx
+#endif
+   integer i, k
+#ifdef MOIST_CAPPA
+      t1g = 2.*dt*dt
+#else
+      t1g = gama * 2.*dt*dt
+#endif
+      rdt = 1. / dt
+    capa1 = kappa - 1.
+
+    do k=1,km
+       do i=is, ie
+#ifdef MOIST_CAPPA
+          pp(i,k) = exp(gm2(i,k)*log(-dm2(i,k)/dz2(i,k)*rgas*pt2(i,k))) - pm2(i,k)
+#else
+#ifdef MULTI_GASES
+          gamax = 1. / ( 1. - kapad2(i,k) )
+          pp(i,k) = exp(gamax*log(-dm2(i,k)/dz2(i,k)*rgas*pt2(i,k))) - pm2(i,k)
+#else
+          pp(i,k) = exp(gama*log(-dm2(i,k)/dz2(i,k)*rgas*pt2(i,k))) - pm2(i,k)
+#endif
+#endif
+          w1(i,k) = w2(i,k)
+       enddo
+    enddo
+    IF(present(jslice)) THEN
+    IF( (is .lt. 128) .and. (ie .gt. 128) .and. (jslice .eq. 128)) then
+       do k = 1,km
+          write(01,*), k, pe(128,k), pm2(128,k)
+          write(02,*), w2(128,k), dz2(128,k), dm2(128,k)
+          write(03,*), pt2(128,k), gm2(128,k), cp2(128,k)
+       enddo
+       do k = 1,km+1
+         write(04,*), pem(128,k)
+       enddo
+
+    ENDIF
+    ENDIF
+!At this point pp is pert p valid at the grid centers, and pm2 is full pressure at grid centers
+
+ ! Set up tridiagonal coeffs for cubic spline interpolation of p' to grid edges
+
+    do k=1,km-1
+       do i=is, ie
+          g_rat(i,k) = dm2(i,k)/dm2(i,k+1)
+             bb(i,k) = 2.*(1.+g_rat(i,k))
+             dd(i,k) = 3.*(pp(i,k) + g_rat(i,k)*pp(i,k+1))
+       enddo
+    enddo
+
+    do i=is, ie
+         bet(i) = bb(i,1)
+        pe(i,1) = 0.
+        pe(i,2) = dd(i,1) / bet(i)
+       bb(i,km) = 2.
+       dd(i,km) = 3.*pp(i,km)
+    enddo
+
+! Forward calculation of tri-diagonal system
+
+    do k=2,km
+      do i=is, ie
+          gam(i,k) =  g_rat(i,k-1) / bet(i)
+            bet(i) =  bb(i,k) - gam(i,k)
+         pe(i,k+1) = (dd(i,k) - pe(i,k) ) / bet(i)
+      enddo
+    enddo
+
+! Do the back substition, result is pe on zone edges.
+
+    do k=km, 2, -1
+       do i=is, ie
+          pe(i,k) = pe(i,k) - gam(i,k)*pe(i,k+1)
+       enddo
+    enddo
+
+! Use pe on zone edges to update w2 (w at grid centers)
+!   do k = 1,km
+!     do i = is,ie
+!       w2(i,k) = w1(i,k) +  dt / dm2(i,k) * (pe(i,k+1)-pe(i,k))
+!       q4(1,i,k)= w2(i,k)
+!     enddo
+!   enddo
+! Start the w-solver - aa is the 2*dt**2*gamma*p_full / dz
+
+    do k=2, km
+       do i=is, ie
+
+#ifdef MOIST_CAPPA
+          aa(i,k) = t1g*0.5*(gm2(i,k-1)+gm2(i,k))/(dz2(i,k-1)+dz2(i,k)) *(pem(i,k)+pe(i,k))
+#else
+          aa(i,k) = t1g/(dz2(i,k-1)+dz2(i,k)) * (pem(i,k)+pe(i,k))
+#endif
+       enddo
+    enddo
+
+! Boundary value calc for forward tri-diagonal solution
+
+    do i=is, ie
+       bet(i)  = dm2(i,1) - aa(i,2)
+       w2(i,1) = (dm2(i,1)*w1(i,1) + dt*pe(i,2)) / bet(i)
+    enddo
+
+! Forward tri-diagonal solution
+
+    do k=2,km-1
+       do i=is, ie
+          gam(i,k) = aa(i,k) / bet(i)
+            bet(i) =  dm2(i,k) - (aa(i,k) + aa(i,k+1) + aa(i,k)*gam(i,k))
+           w2(i,k) = (dm2(i,k)*w1(i,k)+dt*(pe(i,k+1)-pe(i,k))-aa(i,k)*w2(i,k-1))/ bet(i)
+       enddo
+    enddo
+
+! Boundary calc at bottom of grid for solution of w
+
+    do i=is, ie
+#ifdef MOIST_CAPPA
+       p1(i) = t1g*gm2(i,km)/dz2(i,km)*(pem(i,km+1)+pe(i,km+1))
+#else
+       p1(i) = t1g/dz2(i,km)*(pem(i,km+1)+pe(i,km+1))
+#endif
+       gam(i,km) = aa(i,km) / bet(i)
+          bet(i) =  dm2(i,km) - (aa(i,km)+p1(i) + aa(i,km)*gam(i,km))
+        w2(i,km) = (dm2(i,km)*w1(i,km)+dt*(pe(i,km+1)-pe(i,km))-p1(i)*ws(i)-aa(i,km)*w2(i,km-1))/bet(i)
+       z_new(i,km) = 0.5 * dz2(i,km)
+    enddo
+
+! Do the back substition, result is newly updated w in center of zone
+    
+    do k=km-1, 1, -1
+       do i=is, ie
+          w2(i,k) = w2(i,k) - gam(i,k+1)*w2(i,k+1)
+          z_new(i,k) = z_new(i,k+1) + 0.5 * (dz2(i,km+1) + dz2(i,km))
+!          q4(1,i,k) = w2(i,k)
+       enddo
+    enddo
+ 
+! Use cubic spline routine to map w from grid centers (w2 at pm2) to grid edges
+! (we at pem)
+
+! call cs_profile( ws, q4, dm2, km, is, ie, -2, 9 )
+
+! do k = 1,km
+!   do i = is,ie
+!     we(i,k) = q4(2,i,k)
+!   enddo
+! enddo
+
+! do i = is,ie
+!   we(i,km+1) = q4(3,i,km)
+! enddo
+
+! Use 5th order WENO-NW reconstructino to map w to grid edges
+
+ call weno5_profile(we,pm2,w2,ws,is,ie,km)
+
+! Solve for p' at grid centers (pp) using w at grid edges (we)
+
+ do k = 1,km
+   do i=is,ie
+     pp(i,k) = pp(i,k) - gm2(i,k)*pm2(i,k)*(we(i,k+1)-we(i,k))/dz2(i,k)*dt
+   enddo
+ enddo
+
+! Set up tridiagonal coeffs for cubic spline interpolation of p' to grid edges
+
+    do k=1,km-1
+       do i=is, ie
+          g_rat(i,k) = dm2(i,k)/dm2(i,k+1)
+             bb(i,k) = 2.*(1.+g_rat(i,k))
+             dd(i,k) = 3.*(pp(i,k) + g_rat(i,k)*pp(i,k+1))
+       enddo
+    enddo
+
+    do i=is, ie
+         bet(i) = bb(i,1)
+        pe(i,1) = 0.
+        pe(i,2) = dd(i,1) / bet(i)
+       bb(i,km) = 2.
+       dd(i,km) = 3.*pp(i,km)
+    enddo
+
+! Forward calculation of tri-diagonal system
+
+    do k=2,km
+      do i=is, ie
+          gam(i,k) =  g_rat(i,k-1) / bet(i)
+            bet(i) =  bb(i,k) - gam(i,k)
+         pe(i,k+1) = (dd(i,k) - pe(i,k) ) / bet(i)
+      enddo
+    enddo
+
+! Do the back substition, result is pe on zone edges.
+
+    do k=km, 2, -1
+       do i=is, ie
+          pe(i,k) = pe(i,k) - gam(i,k)*pe(i,k+1)
+       enddo
+    enddo
+
+!
+
+! Update dz using new pe
+    
+    do i=is, ie
+        p1(i) = pp(i,km)
+#ifdef MOIST_CAPPA
+       dz2(i,km) = -dm2(i,km)*rgas*pt2(i,km)*exp((cp2(i,km)-1.)*log(max(p_fac*pm2(i,km),p1(i)+pm2(i,km))))
+#else
+       dz2(i,km) = -dm2(i,km)*rgas*pt2(i,km)*exp(capa1*log(max(p_fac*pm2(i,km),p1(i)+pm2(i,km))))
+#endif
+    enddo
+
+    do k=km-1, 1, -1
+       do i=is, ie
+          p1(i) = pp(i,k)
+#ifdef MOIST_CAPPA
+          dz2(i,k) = -dm2(i,k)*rgas*pt2(i,k)*exp((cp2(i,k)-1.)*log(max(p_fac*pm2(i,k),p1(i)+pm2(i,k))))
+
+#else
+#ifdef MULTI_GASES
+          capa1x = kapad2(i,k)-1.
+          dz2(i,k) = -dm2(i,k)*rgas*pt2(i,k)*exp(capa1x*log(max(p_fac*pm2(i,k),p1(i)+pm2(i,k))))
+#else
+          dz2(i,k) = -dm2(i,k)*rgas*pt2(i,k)*exp(capa1*log(max(p_fac*pm2(i,k),p1(i)+pm2(i,k))))
+#endif
+#endif
+       enddo
+    enddo
+    
+    IF(present(jslice)) THEN
+    IF( (is .lt. 128) .and. (ie .gt. 128) .and. (jslice .eq. 128)) then
+
+       do k = 1,km
+          write(97,*), k, pp(128,k), pm2(128,k)
+          write(98,*), w2(128,k), dz2(128,k), dm2(128,k)
+          write(99,*), pt2(128,k), gm2(128,k), cp2(128,k)
+       enddo
+       do k = 1,km+1
+          write(100,*), pe(128,k), we(128,k)
+       enddo
+
+    ENDIF
+    ENDIF
+
+ end subroutine SIMC_solver
 
  subroutine SIM_solver(dt,  is,  ie, km, rgas, gama, gm2, cp2, kappa,  &
 #ifdef MULTI_GASES
@@ -2450,6 +2791,223 @@ subroutine nh_BC_k(ptop, grav, kappa, cp, delp, delzBC_t0, delzBC_t1, pt, phis, 
    enddo
 
 end subroutine nh_BC_k
+
+
+!>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+subroutine SIM_W_1D(dt, is,ie,km, rgas, gama, gm2, cp2, kappa, pe, dm2, pm2, pem, w2, dz2, pt2, ws, p_fac,jslice)
+                        
+   integer, intent(in)  :: is,ie,km
+   real,    intent(in)  :: dt, rgas, gama, kappa, p_fac
+   real,    intent(in), dimension(is:ie,km):: dm2, pt2, pm2, gm2, cp2
+   real,    intent(in ) ::  ws(is:ie)
+   real,    intent(in ), dimension(is:ie,km+1):: pem
+   real,    intent(inout) ::  pe(is:ie,km+1), dz2(is:ie,km), w2(is:ie,km)
+   integer, intent(in) :: jslice
+! Local variables
+
+   real, dimension(is:ie,km  ):: Ak, Bk, Rk, Ck, g_rat, bb, dd, aa, cc, dz1, w1
+   real, dimension(is:ie,km+1):: pp, gam, wE, dm2e, wES
+   real  rdt, capa1, bet(is:ie), t1g
+   integer k,i
+   rdt   = 1. / dt
+   capa1 = kappa - 1.
+
+! Compute non-hydrostatic pert pressure
+
+   do k = 1,km
+   do i = is,ie 
+     pe(i,k)   = exp(gm2(i,k)*log(-dm2(i,k)/dz2(i,k)*rgas*pt2(i,k))) - pm2(i,k)        
+     dm2e(i,k) = dm2(i,k)
+    
+     w1(i,k)   = w2(i,k)
+     dz1(i,k)  = dz2(i,k)
+   enddo   
+   enddo
+
+   !IF(present(jslice)) THEN
+    IF( (is .lt. 128) .and. (ie .gt. 128) .and. (jslice .eq. 128)) then
+       print*,  "jslice present and = 128"
+       do k = 1,km
+          write(01,*), k, pe(128,k), pm2(128,k)
+          write(02,*), w2(128,k), dz2(128,k), dm2(128,k)
+          write(03,*), pt2(128,k), gm2(128,k), cp2(128,k)
+       enddo
+       do k = 1,km+1
+         write(04,*), pem(128,k)
+       enddo
+
+    ENDIF
+    !ENDIF
+
+   do i = is,ie
+      dm2e(i,km+1) = dm2(i,km)
+   enddo
+    
+! Set up tridiagonal coeffs for spline interpolation of w to grid edges. (Extra
+! copy of bb for end calcs)
+
+    do k = 1,km-1
+    do i = is,ie    
+      g_rat(i,k) = dm2e(i,k)/dm2e(i,k+1)
+    
+      aa(i,k)    = 1.0
+      bb(i,k)    = 2.*(1.+g_rat(i,k))
+      cc(i,k)    = g_rat(i,k)
+      dd(i,k)    = 3.*(w1(i,k) + cc(i,k)*w1(i,k+1))
+    enddo
+    enddo
+    
+! Boundary conditions for wE = 0 at top
+
+    do i = is,ie 
+        bet(i)    = bb(i,1)
+        wE(i,1)  = 0.0
+        wE(i,2)  = dd(i,1) / bet(i)
+        bb(i,km) = 2.
+        dd(i,km) = 3.*w1(i,km)
+    enddo
+       
+! Forward calculation of tri-diagonal system
+
+    do k=2,km
+    do i = is,ie 
+      gam(i,k)  =  g_rat(i,k-1) / bet(i)
+      bet(i)     =  bb(i,k) - gam(i,k)
+      wE(i,k+1) = (dd(i,k) - wE(i,k) ) / bet(i)
+    enddo     
+    enddo
+
+! Boundary conditions for wE = [ws(i) at ground]  
+    do i = is,ie 
+      wE(i,km+1) = ws(i)
+    enddo
+
+! Do the back substition, result is wE on zone edges.
+
+    do k = km, 2, -1
+    do i = is,ie 
+      wE(i,k) = wE(i,k) - gam(i,k)*wE(i,k+1)
+    enddo    
+    enddo
+    
+! Validated the wE here.
+    do i = is,ie 
+      wES(i,1:km+1) = wE(i,1:km+1)
+    enddo
+    
+! Compute cell centered tridiagonal coefficients 
+
+    do k = 1, km
+    do i = is,ie 
+      aa(i,k) = dt * gm2(i,k) * (pm2(i,k)+pe(i,k)) / dz1(i,k) 
+    enddo    
+    enddo
+
+! Compute edge centered tridiagonal coefficients and RHS
+
+    do k = 2, km
+    do i = is,ie 
+      cc(i,k) = dt / (0.5 * (dm2(i,k) + dm2(i,k-1))) 
+        
+      Bk(i,k) = 1.0 - cc(i,k) * (aa(i,k-1) + aa(i,k))
+    
+      Ak(i,k) = aa(i,k-1)*cc(i,k)
+        
+      Ck(i,k) = aa(i,k)*cc(i,k)
+    
+      Rk(i,k) = wE(i,k) + cc(i,k) * (wE(i,k) - wE(i,k-1))
+    enddo
+    enddo    
+
+! Boundary value calc for forward tri-diagonal solution
+
+   Rk(i,2)  = Rk(i,2)  - 0.0 * Ck(i,2)    ! this includes the lower bc for w zero here
+    
+   Rk(i,km) = Rk(i,km) - 0.0 * Ck(i,km)   ! this includes the lower bc for w zero here
+  
+! Forward sweep.
+    do i = is,ie 
+        bet(i)    = Bk(i,2)
+
+        wE(i,1)  = 0.0
+
+        wE(i,2)  = Rk(i,2) / bet(i)
+    enddo
+    
+    do k = 3, km
+    do i = is,ie 
+      gam(i,k)  = Ck(i,k-1) / bet(i)
+        
+      bet(i)     = Bk(i,k) - Ak(i,k) * gam(i,k)
+
+      wE(i,k)   = (Rk(i,k) - Ak(i,k) * wE(i,k-1) ) / bet(i)
+    enddo
+    enddo
+    
+    do i = is,ie 
+        wE(i,km+1) = ws(i)
+    enddo
+            
+! Back substitution for solution (wE = 0 at k=1)
+
+    do k = km-1, 2, -1
+    do i = is,ie   
+      wE(i,k) = wE(i,k) - gam(i,k+1)*wE(i,k+1)
+    enddo       
+    enddo
+        
+! Solve for new perturbation pressure
+
+    do k = 1, km
+    do i = is,ie 
+      pp(i,k)  = pe(i,k) - aa(i,k) * (wE(i,k+1) - wE(i,k))
+    enddo
+    enddo
+    
+    
+! Use new pp at cell centers to get new dz's
+
+    do k = 1, km
+    do i = is,ie 
+      dz2(i,k) = -dm2(i,k)*rgas*pt2(i,k)*exp(capa1*log(pp(i,k)+pm2(i,k)))
+    enddo
+    enddo
+    
+! Need to generate new w at cell centers...use the time tendency of dz
+
+    do k = 1,km
+    do i = is,ie 
+        w2(i,k) =  0.5*(wE(i,k) + wE(i,k+1)) !w1(i,k) + rdt * (dz2(i,k) - dz1(i,k))
+    enddo     
+    enddo
+    
+! Retrieve edge pressures
+    do i = is,ie 
+       pe(i,1) = 0.0
+    enddo
+
+    do k = 1,km
+    do i = is,ie   
+      pe(i,k+1) = pe(i,k) + dm2(i,k)*(w2(i,k)-w1(i,k))*rdt
+    enddo    
+    enddo
+
+    !IF(present(jslice)) THEN
+    IF( (is .lt. 128) .and. (ie .gt. 128) .and. (jslice .eq. 128)) then
+
+       do k = 1,km
+          write(97,*), k, pp(128,k), pm2(128,k)
+          write(98,*), w2(128,k), dz2(128,k), dm2(128,k)
+          write(99,*), pt2(128,k), gm2(128,k), cp2(128,k)
+       enddo
+       do k = 1,km+1
+          write(100,*), pe(128,k), wE(128,k)
+       enddo
+
+    ENDIF
+    !ENDIF
+    
+ end subroutine SIM_W_1D
 
 
 end module nh_utils_mod

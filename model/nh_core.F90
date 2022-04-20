@@ -50,7 +50,8 @@ module nh_core_mod
    use nh_utils_mod,      only: update_dz_c, update_dz_d, nh_bc
    use nh_utils_mod,      only: sim_solver, sim1_solver, sim3_solver
    use nh_utils_mod,      only: sim3p0_solver, rim_2d
-   use nh_utils_mod,      only: Riem_Solver_c
+   use nh_utils_mod,      only: Riem_Solver_c, simc_solver
+   use nh_utils_mod,      only: sim_w_1d
    use fv_mp_mod,         only: is_master
    use forpy_mod
 
@@ -201,12 +202,17 @@ CONTAINS
                        pe2,   &
                        dm, pm2, w2, dz2, pt(is:ie,j,1:km), ws(is,j), .false.)
       elseif ( a_imp > 0.999 ) then
-           call SIM1_solver(dt, is, ie, km, rdgas, gama, gm2, cp2, akap, &
-#ifdef MULTI_GASES
-                            kapad2,  &
-#endif
-                            pe2, dm,   &
-                            pm2, pem, w2, dz2, pt(is:ie,j,1:km), ws(is,j), p_fac, simpson, jslice=j)
+!           if (simpson) then
+              call SIM_W_1D(dt, is, ie, km, rdgas, gama, gm2, cp2, akap, pe2,&
+                            dm, pm2, pem, w2, dz2, pt(is:ie,j,1:km),ws(is,j),p_fac,j)
+!            else
+!              call SIM1_solver(dt, is, ie, km, rdgas, gama, gm2, cp2, akap, &
+!#ifdef MULTI_GASES
+!                            kapad2,  &
+!#endif
+!                            pe2, dm,   &
+!                            pm2, pem, w2, dz2, pt(is:ie,j,1:km), ws(is,j), p_fac, simpson, j)
+!           endif
       else
            call SIM_solver(dt, is, ie, km, rdgas, gama, gm2, cp2, akap, &
 #ifdef MULTI_GASES
