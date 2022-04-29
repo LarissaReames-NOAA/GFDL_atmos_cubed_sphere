@@ -189,7 +189,7 @@ contains
     real, intent(IN) :: consv_te
     real, intent(IN) :: kappa, cp_air
     real, intent(IN) :: zvir, ptop
-    real, intent(IN), optional :: time_total
+    integer, intent(IN), optional :: time_total
 
     integer, intent(IN) :: npx
     integer, intent(IN) :: npy

@@ -636,8 +636,9 @@ contains
 
 !>@brief The subroutine 'atmosphere_dynamics' is an API for the main driver
 !! of the FV3 dynamical core responsible for executing a "dynamics" step.
- subroutine atmosphere_dynamics ( Time )
+ subroutine atmosphere_dynamics ( Time,na )
    type(time_type),intent(in) :: Time
+   integer, intent(in) :: na
    integer :: n, psc, atmos_time_step
    integer :: k, w_diff, nt_dyn, n_split_loc, seconds, days
    logical :: used
