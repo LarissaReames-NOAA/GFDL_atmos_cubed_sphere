@@ -2953,9 +2953,10 @@ subroutine SIM_W_1D(dt, is,ie,km, rgas, gama, gm2, cp2, kappa, pe, dm2, pm2, pem
 ! Boundary value calc for forward tri-diagonal solution
 
    do i = is,ie
-      Rk(i,2)  = Rk(i,2)  - 0.0 * Ck(i,2)    ! this includes the lower bc for w zero here
+      !Rk(i,2)  = Rk(i,2)  - 0.0 * Ck(i,2)    ! this includes the lower bc for ws here
+      Bk(i,2) = 1.0 - Ak(i,2)
     
-      Rk(i,km) = Rk(i,km) - 0.0 * Ck(i,km)   ! this includes the lower bc for w zero here
+      Rk(i,km) = Rk(i,km) - ws(i) * Ck(i,km)   ! this includes the lower bc for ws here
    enddo
   
 ! Forward sweep now using Thomas algorithm from wikipedia
@@ -3009,17 +3010,17 @@ subroutine SIM_W_1D(dt, is,ie,km, rgas, gama, gm2, cp2, kappa, pe, dm2, pm2, pem
 
     do k = 1, km
     do i = is,ie 
-      dz2(i,k) = -dm2(i,k)*rgas*pt2(i,k)*exp(capa1*log(pp(i,k)+pm2(i,k)))
+      dz2(i,k) = dz2(i,k) + dt * (wE(i,k+1)-wE(i,k))!-dm2(i,k)*rgas*pt2(i,k)*exp(capa1*log(pp(i,k)+pm2(i,k)))
     enddo
     enddo
     
-! Need to generate new w at cell centers...use the time tendency of dz
+! Need to generate new w at cell centers
 
     do i = is,ie
        w2(i,km) = ( wE(i,km) + 2.*wE(i,km+1) ) * r3
     enddo
 
-    do k = 1,km
+    do k = 1,km-1
     do i = is,ie 
         ! Old
         !w2(i,k) =  0.5*(wE(i,k) + wE(i,k+1)) !w1(i,k) + rdt * (dz2(i,k) - dz1(i,k))

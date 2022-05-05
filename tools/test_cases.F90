@@ -4662,7 +4662,8 @@ end subroutine terminator_tracers
         integer, parameter :: nl_max = 2500
         real, dimension(nl_max) ::  z_snd, p_snd, t_snd, rho_snd, u_snd, v_snd, qv_snd
         real, dimension(bd%is:bd%ie):: pm, qs
-        real, dimension(1:npz):: pk1, pe1, ts1, qs1, dummy
+        real :: th(bd%isd:bd%ied  ,bd%jsd:bd%jed  ,npz)
+        real, dimension(1:npz):: pk1, pe1, ts1, qs1, dummy, ths1
         !real :: us0 = 30.
         real :: dist,r0, f0_const, prf, rgrav, xrad, yrad, zrad,RAD
         real :: xradbub, yradbub
@@ -4697,6 +4698,12 @@ end subroutine terminator_tracers
         integer :: isd, ied, jsd, jed
    
         integer :: b
+
+        real r, g,cp
+        parameter (r = rdgas)
+        parameter (g = grav)
+        parameter (cp = cp_air)
+        parameter p1000mb = 100000.0, cvpm = -718./cp_air
 
         is  = bd%is
         ie  = bd%ie
@@ -5345,7 +5352,8 @@ end subroutine terminator_tracers
         endif
         if (t_profile == -1) then
           do k = 1,npz
-           ts1(k) =  interp_log( t_snd, p_snd, pe1(k), nl_max, nl_snd  )
+           ths1(k) =  interp_log( t_snd, p_snd, pe1(k), nl_max, nl_snd  )
+           ts1(k) = ths1(k) * (pe1(k) / p1000mb)**(rdgas/cp_air)
           enddo
         elseif ( t_profile == 0 ) then
           call SuperCell_Sounding(npz, p00, pk1, ts1, qs1)
@@ -5387,6 +5395,7 @@ end subroutine terminator_tracers
            do j=js,je
               do i=is,ie
                  pt(i,j,k)   = ts1(k)
+                 th(i,j,k) = ths1(k)
                   q(i,j,k,1) = qs1(k)
                  delz(i,j,k)=rdgas/grav*ts1(k)*(1.+zvir*qs1(k))*(peln(i,k,j)-peln(i,k+1,j))
                 enddo
@@ -5523,11 +5532,15 @@ end subroutine terminator_tracers
               RAD=SQRT(xrad*xrad+yrad*yrad+zrad*zrad)
               IF(RAD <= 1.) THEN
                  if (do_rand_perts) then
-                    pt(i,j,k) = pt(i,j,k) + pturb*COS(.5*pi*RAD)**2 + 0.2 * (2.0*rand1-1.0)
+                    th(i,j,k) = th(i,j,k) + pturb*COS(.5*pi*RAD)**2 + 0.2 * (2.0*rand1-1.0)
+                    pt(i,j,k) = th(i,j,k) * (pe1(k) / p1000mb)**(rdgas/cp_air)
                     q(i,j,k,1) = q(i,j,k,1) + bubble_q *COS(.5*pi*RAD)**2 + 1.0E-7 *(2.0*rand2-1.0)
+                    delz(i,j,k)=rdgas/grav*pt(i,j,k)*(1.+zvir*q(i,j,k,1))*(peln(i,k,j)-peln(i,k+1,j))
                  else
-                    pt(i,j,k) = pt(i,j,k) + pturb*COS(.5*pi*RAD)**2
+                    th(i,j,k) = th(i,j,k) + pturb*COS(.5*pi*RAD)**2
+                     pt(i,j,k) = th(i,j,k) * (pe1(k) / p1000mb)**(rdgas/cp_air)
                     q(i,j,k,1) = q(i,j,k,1) + bubble_q *COS(.5*pi*RAD)**2
+                    delz(i,j,k)=rdgas/grav*pt(i,j,k)*(1.+zvir*q(i,j,k,1))*(peln(i,k,j)-peln(i,k+1,j))
                  endif
               ENDIF
              enddo !nbub
@@ -8152,7 +8165,7 @@ end subroutine qs_table
 
           zk(k) = h_input(k)
           p(k) = pm_input(k)
-          t(k) = th_input(k) * (pm_input(k) / p1000mb)**(rdgas/cp_air)
+          t(k) = th_input(k)! * (pm_input(k) / p1000mb)**(rdgas/cp_air)
           u(k) = u_input(k)
           v(k) = v_input(k)
           if(is_master()) print*, zk(k)
