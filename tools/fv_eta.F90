@@ -1895,6 +1895,7 @@ module fv_eta_mod
   do k=2,nlev
      tmp = ak(k) + bk(k)*1000.E2
      if (tmp <= ph1) then
+       print*, "p_above, p", ph1, tmp
        monotonic = .false.
        exit
      endif
@@ -2427,7 +2428,7 @@ module fv_eta_mod
   endif
 
 ! Basic parameters for HIWPP mountain waves
-   t0 = 300.
+   t0 = 287.
 ! ztop = 20.0e3; 500-m resolution in halft of the vertical domain
 ! ztop = real(km-1)*500.
 !-----------------------
@@ -2436,17 +2437,17 @@ module fv_eta_mod
 
 ! Lowest half has constant resolution
      ze(km+1) = 0.
-     do k=km, km-19, -1
+     do k=km, 1, -1
         ze(k) = ze(k+1) + dz0
      enddo
 
 ! Stretching from 10-km and up:
-     do k=km-20, 3,  -1
-        dz0 = s_fac * dz0
-        ze(k) = ze(k+1) + dz0
-     enddo
-     ze(2) = ze(3) + sqrt(2.)*dz0
-     ze(1) = ze(2) + 2.0*dz0
+!     do k=km-20, 3,  -1
+!        dz0 = s_fac * dz0
+!        ze(k) = ze(k+1) + dz0
+!     enddo
+!     ze(2) = ze(3) + sqrt(2.)*dz0
+!     ze(1) = ze(2) + 2.0*dz0
 
 !    call sm1_edge(1, 1, 1, 1, km, 1, 1, ze, 1)
 

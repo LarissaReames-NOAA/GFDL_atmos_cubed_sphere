@@ -1,4 +1,4 @@
-!***********************************************************************
+
 !*                   GNU Lesser General Public License
 !*
 !* This file is part of the FV3 dynamical core.
@@ -68,7 +68,7 @@ public :: dyn_core, del2_cubed, init_ijk_mem
   real :: ptk, peln1, rgrav
   real :: d3_damp
   real, allocatable, dimension(:,:,:) ::  ut, vt, crx, cry, xfx, yfx, divgd, &
-                                          zh, du, dv, pkc, delpc, pk3, ptc, gz
+                                          zh, du, dv, pk3, delpc, ptc, gz, pkc
 ! real, parameter:: delt_max = 1.e-1   ! Max dissipative heating/cooling rate
                                        ! 6 deg per 10-min
   real(kind=R_GRID), parameter :: cnst_0p20=0.20d0
@@ -87,7 +87,7 @@ contains
 
  subroutine dyn_core(npx, npy, npz, ng, sphum, nq, bdt, n_map, n_split, zvir, cp, akap, cappa, grav, hydrostatic,  &
                      u,  v,  w, delz, pt, q, delp, pe, pk, phis, ws, omga, ptop, pfull, ua, va, &
-                     uc, vc, mfx, mfy, cx, cy, pkz, peln, q_con, ak, bk, &
+                     uc, vc, mfx, mfy, cx, cy, pkz, peln, ppnh, ppenh, q_con, ak, bk, &
                      ks, gridstruct, flagstruct, neststruct, idiag, bd, domain, &
                      init_step, i_pack, end_step, diss_est, time_total)
     integer, intent(IN) :: npx
@@ -125,7 +125,8 @@ contains
     real, intent(inout):: pe(bd%is-1:bd%ie+1, npz+1,bd%js-1:bd%je+1)  ! edge pressure (pascal)
     real, intent(inout):: peln(bd%is:bd%ie,npz+1,bd%js:bd%je)          ! ln(pe)
     real, intent(inout):: pk(bd%is:bd%ie,bd%js:bd%je, npz+1)        ! pe**kappa
-
+    real, intent(inout):: ppnh(bd%is:bd%ie,bd%js:bd%je, npz)        ! nh pressure from sim_solver
+    real, intent(out):: ppenh(bd%is:bd%ie,bd%js:bd%je, npz+1)        ! nh pressure from sim_solver
 !-----------------------------------------------------------------------
 ! Others:
     real,    parameter:: near0 = 1.E-8
@@ -522,7 +523,8 @@ contains
            call Riem_Solver_C( ms, dt2,   is,  ie,   js,   je,   npz,   ng,   &
                                akap, cappa,  cp,  ptop, phis, omga, ptc,  &
                                q_con,  delpc, gz,  pkc, ws3, flagstruct%p_fac, &
-                                flagstruct%a_imp, flagstruct%scale_z )
+                                flagstruct%a_imp, flagstruct%scale_z,          &
+                                flagstruct%rf_cutoff, flagstruct%tau_nh, pfull ) !LJR
                                                call timing_off('Riem_Solver')
 
            if (gridstruct%nested) then
@@ -917,9 +919,12 @@ contains
         call Riem_Solver3(flagstruct%m_split, dt,  is,  ie,   js,   je, npz, ng,     &
                          isd, ied, jsd, jed, &
                          akap, cappa, cp,  ptop, zs, q_con, w, delz, pt, delp, zh,   &
-                         pe, pkc, pk3, pk, peln, ws, &
+!                        pe, pkc, pk3, pk, peln, ws, &
+                         pe, pkc, ppnh, pk3,ppenh, pk, peln, ws, &
                          flagstruct%scale_z, flagstruct%p_fac, flagstruct%a_imp, &
-                         flagstruct%use_logp, remap_step, beta<-0.1)
+                         flagstruct%use_logp, remap_step, beta<-0.1, & 
+                         flagstruct%rf_cutoff, flagstruct%tau_nh, pfull(1:npz) ) !LJR
+
                                                          call timing_off('Riem_Solver')
 
                                        call timing_on('COMM_TOTAL')

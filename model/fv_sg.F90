@@ -496,7 +496,7 @@ contains
 #else
  subroutine fv_subgrid_z( isd, ied, jsd, jed, is, ie, js, je, km, nq, dt,    &
                          tau, nwat, delp, pe, peln, pkz, ta, qa, ua, va,  &
-                         hydrostatic, w, delz, u_dt, v_dt, t_dt, q_dt, k_bot )
+                         hydrostatic, w, delz, u_dt, v_dt, w_dt, t_dt, q_dt, k_bot )
 ! Dry convective adjustment-mixing
 !-------------------------------------------
       integer, intent(in):: is, ie, js, je, km, nq, nwat
@@ -518,6 +518,7 @@ contains
       real, intent(inout):: qa(isd:ied,jsd:jed,km,nq)   ! Specific humidity & tracers
       real, intent(inout):: u_dt(isd:ied,jsd:jed,km)
       real, intent(inout):: v_dt(isd:ied,jsd:jed,km)
+      real, intent(inout):: w_dt(isd:ied,jsd:jed,km)
       real, intent(inout):: t_dt(is:ie,js:je,km)
       real, intent(inout):: q_dt(is:ie,js:je,km,nq)
 !---------------------------Local variables-----------------------------
@@ -573,7 +574,7 @@ contains
 !$OMP parallel do default(none) shared(im,is,ie,js,je,nq,kbot,qa,ta,sphum,ua,va,delp,peln,     &
 !$OMP                                  hydrostatic,pe,delz,g2,w,liq_wat,rainwat,ice_wat,  &
 !$OMP                                  snowwat,cv_air,m,graupel,pkz,rk,rz,fra,cld_amt,    &
-!$OMP                                  u_dt,rdt,v_dt,xvir,nwat)                 &
+!$OMP                                  u_dt,rdt,v_dt,q_dt,t_dt,w_dt,xvir,nwat)                 &
 !$OMP                          private(kk,lcp2,icp2,tcp3,dh,dq,den,qs,qsw,dqsdt,qcon,q0, &
 !$OMP                                  t0,u0,v0,w0,h0,pm,gzh,tvm,tmp,cpm,cvm, q_liq,q_sol,&
 !$OMP                                  tv,gz,hd,te,ratio,pt1,pt2,tv1,tv2,ri_ref, ri,mc,km1)
@@ -935,6 +936,8 @@ contains
       do i=is,ie
          u_dt(i,j,k) = rdt*(u0(i,k) - ua(i,j,k))
          v_dt(i,j,k) = rdt*(v0(i,k) - va(i,j,k))
+         t_dt(i,j,k) = rdt*(t0(i,k) - ta(i,j,k))
+         q_dt(i,j,k,:) = rdt*(q0(i,k,:) - qa(i,j,k,:))
            ta(i,j,k) = t0(i,k)   ! *** temperature updated ***
 #ifdef GFS_PHYS
            ua(i,j,k) = u0(i,k)
@@ -953,6 +956,7 @@ contains
    if ( .not. hydrostatic ) then
       do k=1,kbot
          do i=is,ie
+            w_dt(i,j,k) = rdt*(w0(i,k) - w(i,j,k))
             w(i,j,k) = w0(i,k)   ! w updated
          enddo
       enddo

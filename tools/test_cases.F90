@@ -119,6 +119,7 @@
       real(kind=R_GRID), parameter :: one = 1.d0
       integer :: test_case = 11
       logical :: bubble_do = .false.
+      logical :: do_rand_perts = .false.
       logical :: no_wind = .false.
       logical :: gaussian_dt = .false.
       logical :: do_marine_sounding = .false.
@@ -129,6 +130,13 @@
       logical :: checker_tr
       real    :: small_earth_scale = 1.0
       real    :: umean = 0.0
+      integer :: t_profile = 0, q_profile = 0, ws_profile = 0, do_coriolis = 0, bubble_type = 0
+      integer :: n_bub = 1
+      integer, parameter :: max_bub=100
+      real    :: bubble_t = 2., bubble_q = 0., bubble_rad_x = 10.0E3
+      real    :: bubble_rad_y = 10.0E3, bubble_zc = 1.4E3
+      real    :: iso_t = 300., adi_th = 300., us0 = 30., mtn_width = 2.e3, mtn_hgt = 10.0
+      real,dimension(max_bub)    :: icenters, jcenters
 
 ! Case 0 parameters
       real :: p0_c0 = 3.0
@@ -659,7 +667,6 @@
       real ::   pe_v(bd%is:bd%ie+1,npz+1,bd%js:bd%je)
       real ::   ps_u(bd%is:bd%ie,bd%js:bd%je+1)
       real ::   ps_v(bd%is:bd%ie+1,bd%js:bd%je)
-
 
       real :: dz, zetam
 
@@ -4486,7 +4493,6 @@ end subroutine terminator_tracers
 
         real, dimension(bd%is:bd%ie):: pm, qs
         real, dimension(1:npz):: pk1, ts1, qs1
-        real :: us0 = 30.
         real :: dist, r0, f0_const, prf, rgrav
         real :: ptmp, ze, zc, zm, utmp, vtmp, xr, yr
         real :: t00, p00, xmax, xc, xx, yy, pk0, pturb, ztop
@@ -4522,6 +4528,16 @@ end subroutine terminator_tracers
         integer :: is,  ie,  js,  je
         integer :: isd, ied, jsd, jed
 
+        ! NISE additions
+         integer, parameter :: nl_max = 2500
+         real, dimension(nl_max) ::  z_snd, p_snd, t_snd, rho_snd, u_snd, v_snd, qv_snd
+         real :: th(bd%isd:bd%ied  ,bd%jsd:bd%jed  ,npz)
+         real, dimension(1:npz):: pe1, dummy, ths1
+         real :: xrad, yrad, zrad,RAD, rand1, rand2
+         real :: xradbub, yradbub, amplitude=0.2
+         integer :: nl_snd, b
+         real, parameter :: p1000mb = 100000.0
+          
         is  = bd%is
         ie  = bd%ie
         js  = bd%js
@@ -5160,7 +5176,100 @@ end subroutine terminator_tracers
         enddo
 
         endif
+        case ( 20 )
+!---------------------------------------------------------
+! Mountain with isothermal atmosphere at rest no shear
+!---------------------------------------------------------
+           t00 = iso_t
+           N2 = 0.01**2
+           p00 = 1.e5
+           pk0 = exp(kappa*log(p00))
+           th0 = t00/pk0
+           amp = grav*grav/(cp_air*N2)
+           rkap = 1./kappa
 
+           !1. set up topography (uniform-in-y)
+           icenter = npx/2
+           jcenter = npy/2
+           do j=jsd,jed
+              do i=isd,ied
+                 dist=(i-icenter)*dx_const
+                 !phis(i,j)=250.*exp(-(dist/5000.)**2)*cos(pi*dist/4000.)*cos(pi*dist/4000.)
+                 phis(i,j) = mtn_hgt / (1 + dist**2/mtn_width**2)
+                 gz(i,j,npz+1) = phis(i,j)
+              enddo
+           enddo
+
+           !2. Compute surface pressure
+           !    then form pressure surfaces
+           do j=jsd,jed
+              do i=isd,ied
+                 ps(i,j) = p00/exp(phis(i,j) * grav / t00 / Rdgas)
+              enddo
+           enddo
+
+           do k=1,npz+1
+              do j=js,je
+                 do i=is,ie
+                    pe(i,k,j) = ak(k) + ps(i,j)*bk(k)
+                    peln(i,k,j) = log(pe(i,k,j))
+                    pk(i,j,k) = exp(kappa*log(pe(i,k,j)))
+                 enddo
+              enddo
+           enddo
+           do k=1,npz
+              do j=js,je
+                 do i=is,ie
+                    delp(i,j,k) = pe(i,k+1,j) - pe(i,k,j)
+                    !delp(i,j,k) = ak(k+1) - ak(k) + ps(i,j)*(bk(k+1) - bk(k))
+                    pkz(i,j,k) = delp(i,j,k)/(peln(i,k+1,j)-peln(i,k,j))
+                    pkz(i,j,k) = exp(kappa*log(pkz(i,j,k)))
+                 enddo
+              enddo
+           enddo
+           ptop = ak(1)
+
+           !3. Set up isothermal profile
+           do j=js,je
+              do i=is,ie
+                 pt(i,j,npz) = t00
+                 delz(i,j,npz) =rdgas/grav*pt(i,j,npz)*(peln(i,npz,j)-peln(i,npz+1,j))
+                 gz(i,j,npz) = gz(i,j,npz+1) - delz(i,j,npz)
+              enddo
+           enddo
+
+           do k=npz-1,1,-1
+              do j=js,je
+                 do i=is,ie
+                    pt(i,j,k) = t00
+                    delz(i,j,k) = rdgas/grav*pt(i,j,k)*(peln(i,k,j)-peln(i,k+1,j))
+                    gz(i,j,k) = gz(i,j,k+1) - delz(i,j,k)
+                 enddo
+              enddo
+           enddo
+
+           !4. Set up wind profile:
+           u = us0
+           v = 0.0
+           w = 0.0
+           q = 0.0
+           !5. Re-adjust phis and gz ; set up other variables
+           do j=jsd,jed
+              do i=isd,ied
+                 phis(i,j) = phis(i,j)*grav
+              enddo
+           enddo
+           do k=1,npz+1
+              do j=jsd,jed
+                 do i=isd,ied
+                    gz(i,j,k) = gz(i,j,k)*grav
+                 enddo
+              enddo
+           enddo
+
+          call p_var(npz, is, ie, js, je, ptop, ptop_min, delp, delz, pt, ps,&
+                     pe, peln, pk, pkz, kappa, q, ng, ncnst, area, dry_mass, .false., .false., &
+                     moist_phys, hydrostatic, nwat, domain, flagstruct%adiabatic, .not. hydrostatic )
         case ( 21 )
 !---------------------------------------------------------
 ! Mountain wave
@@ -5522,6 +5631,246 @@ end subroutine terminator_tracers
               enddo
            enddo
 
+        case(60)
+           !  NSSL Idealized Supercell Experiment (NISE) test case
+
+        zvir = rvgas/rdgas - 1.
+        p00 = 1000.E2
+        ps(:,:) = p00
+        phis(:,:) = 0.
+        do j=js,je
+           do i=is,ie
+                pk(i,j,1) = ptop**kappa
+                pe(i,1,j) = ptop
+              peln(i,1,j) = log(ptop)
+           enddo
+        enddo
+
+        do k=1,npz
+           do j=js,je
+              do i=is,ie
+                 delp(i,j,k) = ak(k+1)-ak(k) + ps(i,j)*(bk(k+1)-bk(k))
+                 pe(i,k+1,j) = ak(k+1) + ps(i,j)*bk(k+1)
+                 peln(i,k+1,j) = log(pe(i,k+1,j))
+                   pk(i,j,k+1) = exp( kappa*peln(i,k+1,j) )
+              enddo
+           enddo
+        enddo
+
+        i = is
+        j = js
+        do k=1,npz
+           pk1(k) = (pk(i,j,k+1)-pk(i,j,k))/(kappa*(peln(i,k+1,j)-peln(i,k,j)))
+           pe1(k) = (pe(i,k+1,j)-pe(i,k,j))/(peln(i,k+1,j)-peln(i,k,j))
+        enddo
+
+        if (t_profile == -1 .or. q_profile == -1 .or. ws_profile == -1) then
+          call get_sounding( z_snd, p_snd, t_snd, rho_snd, u_snd, v_snd, qv_snd, nl_max, nl_snd )
+        endif
+        if (t_profile == -1) then
+          do k = 1,npz
+           ths1(k) =  interp_log( t_snd, p_snd, pe1(k), nl_max, nl_snd  )
+           ts1(k) = ths1(k) * (pe1(k) / p1000mb)**(rdgas/cp_air)
+          enddo
+        elseif ( t_profile == 0 ) then
+          call SuperCell_Sounding(npz, p00, pk1, ts1, qs1)
+        elseif (t_profile == 1 ) then
+          !adiabatic
+          print*, "kappa, adi_th = ", kappa, adi_th
+          do k=1,npz
+            ts1(k) = adi_th * ( pe1(k) / 1E5) ** kappa
+          enddo
+        elseif (t_profile == 2) then
+          !isothermal
+          ts1(:) = iso_t
+        else
+          call mpp_error(FATAL, " t_profile ", t_profile ,"  not defined" )
+        endif 
+
+        if (q_profile == -1) then
+          do k = 1,npz
+           qs1(k) =  interp_log( qv_snd, p_snd, pe1(k), nl_max,nl_snd  )
+          enddo
+        elseif ( q_profile==0 ) then
+          if (t_profile == 0) then
+            ! qs1 already computed prior, move along
+          else
+            call SuperCell_Sounding(npz, p00, pk1, dummy, qs1)
+          endif
+        elseif (q_profile==1 ) then
+          ! dry environment
+          qs1(:) = 1E-9
+        else
+          call mpp_error(FATAL, " q_profile ", q_profile ,"  not defined" )
+        endif
+
+        ! Compute delz from ts1 and qs1
+        w(:,:,:) = 0.
+        q(:,:,:,:) = 0.
+
+        do k=1,npz
+           do j=js,je
+              do i=is,ie
+                 pt(i,j,k)   = ts1(k)
+                 th(i,j,k) = ths1(k)
+                  q(i,j,k,1) = qs1(k)
+                 delz(i,j,k)=rdgas/grav*ts1(k)*(1.+zvir*qs1(k))*(peln(i,k,j)-peln(i,k+1,j))
+                enddo
+             enddo
+          enddo
+
+        ze1(npz+1) = 0.
+        do k=npz,1,-1
+           ze1(k) = ze1(k+1) - delz(is,js,k)
+        enddo
+
+        if (ws_profile == -1) then
+          do k = 1,npz
+           zm = 0.5*(ze1(k)+ze1(k+1))
+           utmp =  interp_lin( u_snd, z_snd, zm, nl_max, nl_snd  )
+           vtmp = interp_lin( v_snd, z_snd,zm, nl_max, nl_snd  )
+            do j=js,je+1
+              do i=is,ie
+                 u(i,j,k) = utmp
+             enddo
+           enddo
+            do j=js,je
+              do i=is,ie+1
+                v(i,j,k) = vtmp
+              enddo
+            enddo
+          enddo
+        elseif ( ws_profile==0 ) then
+        ! Quarter-circle hodograph (Harris approximation)
+          do k=1,npz
+           zm = 0.5*(ze1(k)+ze1(k+1))
+           if ( zm .le. 2.e3 ) then
+               utmp = 8.*(1.-cos(pi*zm/4.e3))
+               vtmp = 8.*sin(pi*zm/4.e3)
+           elseif (zm .le. 6.e3 ) then
+               utmp = 8. + (us0-8.)*(zm-2.e3)/4.e3
+               vtmp = 8.
+           else
+               utmp = us0
+               vtmp = 8.
+           endif
+! u-wind
+           do j=js,je+1
+              do i=is,ie
+                 u(i,j,k) = utmp - 8.
+             enddo
+           enddo
+! v-wind
+           do j=js,je
+              do i=is,ie+1
+                 v(i,j,k) = vtmp - 4.
+             enddo
+           enddo
+          enddo
+        elseif (ws_profile==1 ) then
+        ! Linear WK shear
+          v(:,:,:) = 0.
+          do k=1,npz
+            zm = 0.5*(ze1(k)+ze1(k+1))
+            if ( zm .le. 6.e3 ) then
+              u(:,:,k) = us0 * tanh(zm/3.e3)
+            else
+              u(:,:,k) = us0
+            endif
+          enddo
+        elseif (ws_profile==2 ) then
+        ! constant u, v=0
+          u(:,:,:) = us0
+          v(:,:,:) = 0.
+        elseif (ws_profile==3 ) then
+        ! constant v, u=0
+          u(:,:,:) = 0.
+          v(:,:,:) = us0
+        elseif (ws_profile==4 ) then
+          u(:,:,:) = 0.
+          v(:,:,:) = 0.
+        elseif (ws_profile==5) then
+          ! Linear WK shear below 2.5km
+          v(:,:,:) = 0.
+          do k=1,npz
+            zm = 0.5*(ze1(k)+ze1(k+1))
+            if ( zm .le. 2.5e3 ) then
+              u(:,:,k) = us0 * tanh(zm/3.e3)
+            else
+              u(:,:,k) = us0
+            endif
+          enddo
+        else
+          call mpp_error(FATAL, " ws_profile ", ws_profile ,"  not defined" )
+              endif
+
+        call p_var(npz, is, ie, js, je, ptop, ptop_min, delp, delz, pt, ps,&
+                   pe, peln, pk, pkz, kappa, q, ng, ncnst, area, dry_mass,.false.,.false., &
+                  .true., hydrostatic, nwat, domain, flagstruct%adiabatic)
+
+        if (bubble_type > 0) then
+! *** Add Initial perturbation ***
+          pturb = bubble_t
+          xradbub = bubble_rad_x
+          yradbub = bubble_rad_y
+          zc = bubble_zc     ! center of bubble from surface
+          if (bubble_type == 1) then
+            icenter = (npx-1)/2 + 1
+            jcenter = (npy-1)/2 + 1
+            n_bub = 1
+          elseif (bubble_type == 2) then
+            !Line of centered N-S bubbles for squall line
+            !n_bub = floor(float(npy)*dy_const/r0)
+            if ( is_master() )  print*, "initializing ", n_bub , " bubbles"
+            icenter = 0
+          elseif (bubble_type == 3) then
+            ! User entry of i/j bubble locations
+          endif
+          do j = js, je
+          do i = is, ie
+          do k=1, npz
+            do b = 1, n_bub
+              call random_number(rand1)
+              call random_number(rand2)
+              if (bubble_type == 2) then
+                jcenter=((npy-1)/2+1)-((n_bub+1)/2-b)*30000.0/dy_const
+              elseif (bubble_type == 3) then
+                icenter = icenters(b)
+                jcenter = jcenters(b)
+              endif
+              zm = 0.5*(ze1(k)+ze1(k+1))
+              yrad = dy_const*float(j-jcenter)/yradbub
+              xrad = dx_const*float(i-icenter)/xradbub
+
+              zrad = (zm-zc)/zc
+              RAD=SQRT(xrad*xrad+yrad*yrad+zrad*zrad)
+              IF(RAD <= 1.) THEN
+                 if (do_rand_perts) then
+                    th(i,j,k) = th(i,j,k) + pturb*COS(.5*pi*RAD)**2 + 0.2 *(2.0*rand1-1.0)
+                    pt(i,j,k) = th(i,j,k) * (pe1(k) / p1000mb)**(rdgas/cp_air)
+                    q(i,j,k,1) = q(i,j,k,1) + bubble_q *COS(.5*pi*RAD)**2 +1.0E-7 *(2.0*rand2-1.0)
+                    delz(i,j,k)=rdgas/grav*pt(i,j,k)*(1.+zvir*q(i,j,k,1))*(peln(i,k,j)-peln(i,k+1,j))
+                 else            
+                    th(i,j,k) = th(i,j,k) + pturb*COS(.5*pi*RAD)**2
+                     pt(i,j,k) = th(i,j,k) * (pe1(k) / p1000mb)**(rdgas/cp_air)
+                    print*, "pt at i, j, k =", pt(i,j,k), i, j, k
+                    q(i,j,k,1) = q(i,j,k,1) + bubble_q *COS(.5*pi*RAD)**2
+                    delz(i,j,k)=rdgas/grav*pt(i,j,k)*(1.+zvir*q(i,j,k,1))*(peln(i,k,j)-peln(i,k+1,j))
+                 endif
+              ENDIF
+             enddo !nbub
+           enddo!npz
+           enddo!i
+           enddo!j
+         endif !bubbletype
+         uc(isd:ied,:,:) =  u(:,jsd:jed,:)
+        uc(ied+1,:,:) = u(ied,jsd:jed,:)
+        ua(:,:,:) = u(:,jsd:jed,:)
+
+        vc(:,jsd:jed,:) = v(isd:ied,:,:)
+        vc(:,jed+1,:) = v(isd:ied,jed,:)
+        va(:,:,:) = v(isd:ied,:,:)
+        
         end select
 
         is_ideal_case = .true.
@@ -5571,7 +5920,11 @@ end subroutine terminator_tracers
         character(*), intent(IN) :: nml_filename
         integer :: ierr, f_unit, unit, ios
         namelist /test_case_nml/test_case, bubble_do, alpha, nsolitons, soliton_Umax, soliton_size, &
-             no_wind, gaussian_dt, dt_amp, do_marine_sounding, checker_tr, small_earth_scale, Umean
+             no_wind, gaussian_dt, dt_amp, do_marine_sounding, checker_tr, small_earth_scale, Umean, &
+             t_profile, q_profile, ws_profile, bubble_t, bubble_q,  &
+                                bubble_zc, do_coriolis, iso_t, adi_th, us0,bubble_type,n_bub, &
+                                icenters,jcenters, bubble_rad_x, bubble_rad_y, do_rand_perts, &
+                                mtn_hgt, mtn_width
 
 #include<file_version.h>
 
@@ -7974,6 +8327,206 @@ end subroutine terminator_tracers
 
  end subroutine sm1_edge
 
+subroutine get_sounding( zk, p, t, rho, u, v, qv, nl_max, nl_in )
+      implicit none
 
+      integer nl_max, nl_in
+      real zk(nl_max), p(nl_max), theta(nl_max), rho(nl_max), &
+           u(nl_max), v(nl_max), qv(nl_max), p_dry(nl_max), t(nl_max)
+
+      integer n
+      parameter(n=1000)
+      logical debug
+      parameter( debug = .true.)
+      character*256 message
+
+! input sounding data
+
+      real p_surf, th_surf, qv_surf
+      real pi_surf, pi(n)
+      real h_input(n), th_input(n), qv_input(n), u_input(n), v_input(n)
+
+! diagnostics
+
+      real rho_surf, p_input(n), rho_input(n)
+      real pm_input(n)  !  this are for full moist sounding
+
+! local data
+
+      real r, g,cp
+      parameter (r = rdgas)
+      parameter (g = grav)
+      parameter (cp = cp_air)
+      parameter p1000mb = 100000.0, cvpm = -718./cp_air
+      parameter rvovrd = rvgas/rdgas
+      integer k, it, nl, nl_file, istat
+      real qvf, qvf1, dz
+      character*256 line
+
+!  first, read the sounding
+   print*,"OPEN SOUNDING FILE: ", trim('input_sounding')
+   open(14, file=trim('input_sounding'), form='formatted', iostat=istat)
+   if (istat /= 0) then
+     call mpp_error(FATAL,"ERROR OPENING VARIABLE MAPPING FILE")
+   endif
+
+   nl = 0
+   nl_file = 0
+
+   !Loop over lines of file to count the number of levels
+   do
+     read(14, '(A)', iostat=istat) line
+     if (istat/=0) exit
+     if ( trim(line) .eq. '' ) cycle
+     nl_file = nl_file + 1
+   enddo
+   if ( nl_file == 0) call mpp_error(FATAL,"VARMAP FILE IS EMPTY.")
+   nl = nl_file -1
+
+   nl_in = nl
+   if(nl_in .gt. nl_max ) then
+     print*, ' too many levels for input arrays ',nl_in,nl_max
+     call mpp_error (FATAL, 'Too many levels for input arrays ' )
+    end if
+
+  rewind(14)
+   read(14,*,iostat=istat) p_surf, th_surf, qv_surf
+    do k = 2,nl_file
+      read(14, *, iostat=istat) h_input(nl_in-k+2), th_input(nl_in-k+2), qv_input(nl_in-k+2), u_input(nl_in-k+2), v_input(nl_in-k+2)
+     if (istat /= 0) call mpp_error(FATAL,"READING VARIABLE MAPPING FILE")
+   enddo
+   close(14)
+
+   !  compute diagnostics,
+!  first, convert qv(g/kg) to qv(g/g)
+
+      do k=1,nl
+        qv_input(k) = 0.001*qv_input(k)
+      enddo
+
+      p_surf = 100.*p_surf  ! convert to pascals
+      qvf = 1. + rvovrd*qv_input(1)
+      rho_surf = 1./((r/p1000mb)*th_surf*qvf*((p_surf/p1000mb)**cvpm))
+      pi_surf = (p_surf/p1000mb)**(r/cp)
+
+
+
+!  integrate moist sounding hydrostatically, starting from the
+!  specified surface pressure
+!  -> first, integrate from surface to lowest level
+
+          qvf = 1. + rvovrd*qv_input(nl)
+          qvf1 = 1. + qv_input(nl)
+          rho_input(nl) = rho_surf
+          dz = h_input(nl)
+          do it=1,10
+            pm_input(nl) = p_surf &
+                    - 0.5*dz*(rho_surf+rho_input(nl))*g*qvf1
+            rho_input(nl) =1./((r/p1000mb)*th_input(nl)*qvf*((pm_input(nl)/p1000mb)**cvpm))
+          enddo
+          do k=nl-1,1,-1
+            rho_input(k) = rho_input(k+1)
+            dz = h_input(k)-h_input(k+1)
+            qvf1 = 0.5*(2.+(qv_input(k+1)+qv_input(k)))
+            qvf = 1. + rvovrd*qv_input(k)   ! qv is in g/kg here
+
+            do it=1,10
+              pm_input(k) = pm_input(k+1) &
+                      - 0.5*dz*(rho_input(k)+rho_input(k+1))*g*qvf1
+              IF(pm_input(k) .LE. 0. )THEN
+                print*, "Integrated pressure has gone negative - toocold forchosen height"
+                WRITE(message,*)'k,pm_input(k),h_input(k),th_input(k)=',k,pm_input(k),h_input(k),th_input(k)
+                CALL mpp_error (FATAL, message )
+              ENDIF             
+              rho_input(k) =1./((r/p1000mb)*th_input(k)*qvf*((pm_input(k)/p1000mb)**cvpm))
+            enddo
+          enddo
+      do k=1,nl
+
+          zk(k) = h_input(k)
+          p(k) = pm_input(k)
+          t(k) = th_input(k)! * (pm_input(k) / p1000mb)**(rdgas/cp_air)
+          u(k) = u_input(k)
+          v(k) = v_input(k)
+          if(is_master()) print*, zk(k)
+          qv(k) = qv_input(k)
+
+        enddo
+  end subroutine get_sounding
+
+ real function interp_log( v_in, p_in, p_out, nzmax,nz_in  )
+ implicit none
+ integer, intent(in) ::  nz_in, nzmax
+ real, intent(in) ::   v_in(nzmax), p_in(nzmax)
+ real, intent(in) ::   p_out
+
+ integer kp, k, im, ip, nz_out
+ logical interp, increasing_z
+ real    pres, w1, w2
+ logical debug
+ parameter ( debug = .false. )
+
+ pres = p_out
+    IF (pres > p_in(nz_in)) then
+      w2 = (log(p_in(nz_in))-log(pres))/(log(p_in(nz_in))-log(p_in(nz_in-1)))
+      w1 = 1.-w2
+      interp_log = v_in(nz_in)**w1 * v_in(nz_in-1)**w2
+    ELSE IF (pres < p_in(1)) then
+      w2 = (log(p_in(2))-log(pres))/(log(p_in(2))-log(p_in(1)))
+      w1 = 1.-w2
+      interp_log = v_in(2)**w1 * v_in(1)**w2
+    ELSE
+      interp = .false.
+      kp = nz_in
+      DO WHILE ( (interp .eqv. .false.) .and. (kp .ge. 2) )
+        IF(   ((p_in(kp)   .ge. pres) .and.     &
+               (p_in(kp-1) .le. pres))             )   THEN
+          w2 = (log(pres)-log(p_in(kp)))/(log(p_in(kp-1))-log(p_in(kp)))
+          w1 = 1.-w2
+          interp_log = v_in(kp)**w1 * v_in(kp-1)**w2
+          interp = .true.
+        END IF
+        kp = kp-1
+      ENDDO
+    ENDIF
+ end function interp_log
+
+ real function interp_lin( v_in, z_in, z_out, nzmax,nz_in  )
+ implicit none
+ integer, intent(in) ::  nz_in, nzmax
+ real, intent(in) ::   v_in(nzmax), z_in(nzmax)
+ real, intent(in) ::   z_out
+
+ integer kp, k, im, ip, nz_out
+ logical interp, increasing_z
+ real    height, w1, w2
+ logical debug
+ parameter ( debug = .true. )
+
+height = z_out
+IF (height < z_in(nz_in)) then
+      w2 = (z_in(nz_in)-height)/(z_in(nz_in)-z_in(nz_in-1))
+      w1 = 1.-w2
+      interp_lin = w1*v_in(nz_in) + w2*v_in(nz_in-1)
+    ELSE IF (height > z_in(1)) then
+      w2 = (z_in(2)-height)/(z_in(2)-z_in(1))
+      w1 = 1.-w2
+      interp_lin = w1*v_in(2) + w2*v_in(1)
+    ELSE
+      interp = .false.
+      kp = nz_in
+      height = z_out
+      DO WHILE ( (interp .eqv. .false.) .and. (kp .ge. 2) )
+        IF(   ((z_in(kp)   .le. height) .and.     &
+               (z_in(kp-1) .ge. height))             )   THEN
+          w2 = (height-z_in(kp))/(z_in(kp-1)-z_in(kp))
+          w1 = 1.-w2
+          interp_lin = w1*v_in(kp) + w2*v_in(kp-1)
+          interp = .true.
+        END IF
+        kp = kp-1
+      ENDDO
+    ENDIF
+ end function interp_lin
 
 end module test_cases_mod

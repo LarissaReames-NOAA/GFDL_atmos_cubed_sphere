@@ -24,10 +24,11 @@ module nh_utils_mod
 ! To do list:
 ! include moisture effect in pt
 !------------------------------
-   use constants_mod,     only: rdgas, cp_air, grav
+   use constants_mod,     only: rdgas, cp_air, grav, pi     !LJR
    use tp_core_mod,       only: fv_tp_2d
    use sw_core_mod,       only: fill_4corners, del6_vt_flux
    use fv_arrays_mod,     only: fv_grid_bounds_type, fv_grid_type, fv_nest_BC_type_3d
+   use fv_mp_mod,         only: is_master
 
    implicit none
    private
@@ -312,11 +313,13 @@ CONTAINS
 
   subroutine Riem_Solver_c(ms,   dt,  is,   ie,   js, je, km,   ng,  &
                            akap, cappa, cp,  ptop, hs, w3,  pt, q_con, &
-                           delp, gz,  pef,  ws, p_fac, a_imp, scale_m)
+                           delp, gz,  pef,  ws, p_fac, a_imp, scale_m, &
+                           rf_cutoff, tau_nh, pfull)            !:JR
 
    integer, intent(in):: is, ie, js, je, ng, km
    integer, intent(in):: ms
    real, intent(in):: dt,  akap, cp, ptop, p_fac, a_imp, scale_m
+   real, intent(in):: rf_cutoff, tau_nh, pfull(km)     !LJR
    real, intent(in):: ws(is-ng:ie+ng,js-ng:je+ng)
    real, intent(in), dimension(is-ng:ie+ng,js-ng:je+ng,km):: pt, delp
    real, intent(in), dimension(is-ng:,js-ng:,1:):: q_con, cappa
@@ -326,8 +329,9 @@ CONTAINS
    real, intent(inout), dimension(is-ng:ie+ng,js-ng:je+ng,km+1):: gz
    real, intent(  out), dimension(is-ng:ie+ng,js-ng:je+ng,km+1):: pef
 ! Local:
-  real, dimension(is-1:ie+1,km  ):: dm, dz2, w2, pm2, gm2, cp2
+  real, dimension(is-1:ie+1,km  ):: dm, dz2, w2, pm2, gm2, cp2, pp2
   real, dimension(is-1:ie+1,km+1):: pem, pe2, peg
+  !real, dimension(is:ie,km) :: pp2
   real gama, rgrav
   integer i, j, k
   integer is1, ie1
@@ -338,9 +342,9 @@ CONTAINS
    is1 = is - 1
    ie1 = ie + 1
 
-!$OMP parallel do default(none) shared(js,je,is1,ie1,km,delp,pef,ptop,gz,rgrav,w3,pt, &
+!$OMP parallel do default(none) shared(js,je,is1,ie1,km,delp,pef,ptop,gz,rgrav,w3,pt,rf_cutoff,tau_nh,pfull, &  !!LJR
 !$OMP                                  a_imp,dt,gama,akap,ws,p_fac,scale_m,ms,hs,q_con,cappa) &
-!$OMP                          private(cp2,gm2, dm, dz2, w2, pm2, pe2, pem, peg)
+!$OMP                          private(cp2,gm2, dm, dz2, w2, pm2, pe2, pem, peg,pp2)
    do 2000 j=js-1, je+1
 
       do k=1,km
@@ -394,8 +398,9 @@ CONTAINS
            call RIM_2D(ms, dt, is1, ie1, km, rdgas, gama, gm2, pe2, &
                        dm, pm2, w2, dz2, pt(is1:ie1,j,1:km), ws(is1,j), .true.)
       else
-           call SIM1_solver(dt, is1, ie1, km, rdgas, gama, gm2, cp2, akap, pe2,  &
-                            dm, pm2, pem, w2, dz2, pt(is1:ie1,j,1:km), ws(is1,j), p_fac)
+           call SIM1_solver(dt, is1, ie1, km, rdgas, gama, gm2, cp2, akap, pe2, pp2,  &
+                            dm, pm2, peg, w2, dz2, pt(is1:ie1,j,1:km), ws(is1,j), p_fac, &
+                            rf_cutoff, tau_nh, pfull, ptop)           !LJR
       endif
 
       do k=2,km+1
@@ -418,175 +423,6 @@ CONTAINS
 2000  continue
 
   end subroutine Riem_Solver_c
-
-
-!GFDL - This routine will not give absoulte reproducibility when compiled with -fast-transcendentals.
-!GFDL - It is now inside of nh_core.F90 and being compiled without -fast-transcendentals.
-  subroutine Riem_Solver3test(ms, dt,   is,   ie,   js, je, km, ng,    &
-                          isd, ied, jsd, jed, akap, cappa, cp,     &
-                          ptop, zs, q_con, w,  delz, pt,  &
-                          delp, zh, pe, ppe, pk3, pk, peln, &
-                          ws, scale_m,  p_fac, a_imp, &
-                          use_logp, last_call, fp_out)
-!--------------------------------------------
-! !OUTPUT PARAMETERS
-! Ouput: gz: grav*height at edges
-!        pe: full     hydrostatic pressure
-!       ppe: non-hydrostatic pressure perturbation
-!--------------------------------------------
-   integer, intent(in):: ms, is, ie, js, je, km, ng
-   integer, intent(in):: isd, ied, jsd, jed
-   real, intent(in):: dt         ! the BIG horizontal Lagrangian time step
-   real, intent(in):: akap, cp, ptop, p_fac, a_imp, scale_m
-   real, intent(in):: zs(isd:ied,jsd:jed)
-   logical, intent(in):: last_call, use_logp, fp_out
-   real, intent(in):: ws(is:ie,js:je)
-   real, intent(in), dimension(isd:,jsd:,1:):: q_con, cappa
-   real, intent(in), dimension(isd:ied,jsd:jed,km):: delp, pt
-   real, intent(inout), dimension(isd:ied,jsd:jed,km+1):: zh
-   real, intent(inout), dimension(isd:ied,jsd:jed,km):: w
-   real, intent(inout):: pe(is-1:ie+1,km+1,js-1:je+1)
-   real, intent(out):: peln(is:ie,km+1,js:je)          ! ln(pe)
-   real, intent(out), dimension(isd:ied,jsd:jed,km+1):: ppe
-   real, intent(out):: delz(is:ie,js:je,km)
-   real, intent(out):: pk(is:ie,js:je,km+1)
-   real, intent(out):: pk3(isd:ied,jsd:jed,km+1)
-! Local:
-  real, dimension(is:ie,km):: dm, dz2, pm2, w2, gm2, cp2
-  real, dimension(is:ie,km+1)::pem, pe2, peln2, peg, pelng
-  real gama, rgrav, ptk, peln1
-  integer i, j, k
-
-    gama = 1./(1.-akap)
-   rgrav = 1./grav
-   peln1 = log(ptop)
-     ptk = exp(akap*peln1)
-
-!$OMP parallel do default(none) shared(is,ie,js,je,km,delp,ptop,peln1,pk3,ptk,akap,rgrav,zh,pt, &
-!$OMP                                  w,a_imp,dt,gama,ws,p_fac,scale_m,ms,delz,last_call,  &
-!$OMP                                  peln,pk,fp_out,ppe,use_logp,zs,pe,cappa,q_con )          &
-!$OMP                          private(cp2, gm2, dm, dz2, pm2, pem, peg, pelng, pe2, peln2, w2)
-   do 2000 j=js, je
-
-      do k=1,km
-         do i=is, ie
-            dm(i,k) = delp(i,j,k)
-#ifdef MOIST_CAPPA
-            cp2(i,k) = cappa(i,j,k)
-#endif
-         enddo
-      enddo
-
-      do i=is,ie
-         pem(i,1) = ptop
-         peln2(i,1) = peln1
-         pk3(i,j,1) = ptk
-#ifdef USE_COND
-         peg(i,1) = ptop
-         pelng(i,1) = peln1
-#endif
-      enddo
-      do k=2,km+1
-         do i=is,ie
-            pem(i,k) = pem(i,k-1) + dm(i,k-1)
-            peln2(i,k) = log(pem(i,k))
-#ifdef USE_COND
-! Excluding contribution from condensates:
-! peln used during remap; pk3 used only for p_grad
-            peg(i,k) = peg(i,k-1) + dm(i,k-1)*(1.-q_con(i,j,k-1))
-            pelng(i,k) = log(peg(i,k))
-#endif
-            pk3(i,j,k) = exp(akap*peln2(i,k))
-         enddo
-      enddo
-
-      do k=1,km
-         do i=is, ie
-#ifdef USE_COND
-            pm2(i,k) = (peg(i,k+1)-peg(i,k))/(pelng(i,k+1)-pelng(i,k))
-
-#ifdef MOIST_CAPPA
-            gm2(i,k) = 1. / (1.-cp2(i,k))
-#endif
-
-#else
-            pm2(i,k) = dm(i,k)/(peln2(i,k+1)-peln2(i,k))
-#endif
-             dm(i,k) = dm(i,k) * rgrav
-            dz2(i,k) = zh(i,j,k+1) - zh(i,j,k)
-             w2(i,k) = w(i,j,k)
-         enddo
-      enddo
-
-      if ( a_imp < -0.999 ) then
-           call SIM3p0_solver(dt, is, ie, km, rdgas, gama, akap, pe2, dm,  &
-                              pem, w2, dz2, pt(is:ie,j,1:km), ws(is,j), p_fac, scale_m )
-      elseif ( a_imp < -0.5 ) then
-           call SIM3_solver(dt, is, ie, km, rdgas, gama, akap, pe2, dm,   &
-                        pem, w2, dz2, pt(is:ie,j,1:km), ws(is,j), abs(a_imp), p_fac, scale_m)
-      elseif ( a_imp <= 0.5 ) then
-           call RIM_2D(ms, dt, is, ie, km, rdgas, gama, gm2, pe2,   &
-                       dm, pm2, w2, dz2, pt(is:ie,j,1:km), ws(is,j), .false.)
-      elseif ( a_imp > 0.999 ) then
-           call SIM1_solver(dt, is, ie, km, rdgas, gama, gm2, cp2, akap, pe2, dm,   &
-                            pm2, pem, w2, dz2, pt(is:ie,j,1:km), ws(is,j), p_fac)
-      else
-           call SIM_solver(dt, is, ie, km, rdgas, gama, gm2, cp2, akap, pe2, dm,  &
-                           pm2, pem, w2, dz2, pt(is:ie,j,1:km), ws(is,j), &
-                           a_imp, p_fac, scale_m)
-      endif
-
-      do k=1, km
-         do i=is, ie
-            w(i,j,k) = w2(i,k)
-            delz(i,j,k) = dz2(i,k)
-         enddo
-      enddo
-
-      if ( last_call ) then
-           do k=1,km+1
-              do i=is,ie
-                 peln(i,k,j) = peln2(i,k)
-                   pk(i,j,k) = pk3(i,j,k)
-                   pe(i,k,j) = pem(i,k)
-              enddo
-           enddo
-      endif
-
-      if( fp_out ) then
-         do k=1,km+1
-         do i=is, ie
-            ppe(i,j,k) = pe2(i,k) + pem(i,k)
-         enddo
-         enddo
-      else
-         do k=1,km+1
-         do i=is, ie
-            ppe(i,j,k) = pe2(i,k)
-         enddo
-         enddo
-      endif
-
-      if ( use_logp ) then
-         do k=2,km+1
-         do i=is, ie
-            pk3(i,j,k) = peln2(i,k)
-         enddo
-         enddo
-      endif
-
-      do i=is, ie
-         zh(i,j,km+1) = zs(i,j)
-      enddo
-      do k=km,1,-1
-         do i=is, ie
-            zh(i,j,k) = zh(i,j,k+1) - dz2(i,k)
-         enddo
-      enddo
-
-2000  continue
-
-  end subroutine Riem_Solver3test
 
 
   subroutine imp_diff_w(j, is, ie, js, je, ng, km, cd, delz, ws, w, w3)
@@ -1190,14 +1026,16 @@ CONTAINS
  end subroutine SIM3p0_solver
 
 
- subroutine SIM1_solver(dt,  is,  ie, km, rgas, gama, gm2, cp2, kappa, pe, dm2,   &
-                        pm2, pem, w2, dz2, pt2, ws, p_fac)
+ subroutine SIM1_solver(dt,  is,  ie, km, rgas, gama, gm2, cp2, kappa, pe, pp2, dm2,   &
+                        pm2, pem, w2, dz2, pt2, ws, p_fac, &
+                        rf_cutoff, tau_nh, pfull, ptop)          !LJR
    integer, intent(in):: is, ie, km
    real,    intent(in):: dt, rgas, gama, kappa, p_fac
+   real,    intent(in):: rf_cutoff, tau_nh, pfull(km), ptop      !LJR
    real, intent(in), dimension(is:ie,km):: dm2, pt2, pm2, gm2, cp2
    real, intent(in )::  ws(is:ie)
    real, intent(in ), dimension(is:ie,km+1):: pem
-   real, intent(out)::  pe(is:ie,km+1)
+   real, intent(out)::  pe(is:ie,km+1), pp2(is:ie,km)
    real, intent(inout), dimension(is:ie,km):: dz2, w2
 ! Local
    real, dimension(is:ie,km  ):: aa, bb, dd, w1, g_rat, gam
@@ -1205,6 +1043,7 @@ CONTAINS
    real, dimension(is:ie):: p1, bet
    real t1g, rdt, capa1
    integer i, k
+   real :: rff(km)       !LJR
 
 #ifdef MOIST_CAPPA
       t1g = 2.*dt*dt
@@ -1292,6 +1131,18 @@ CONTAINS
        enddo
     enddo
 
+    ! RAYLEIGH DAMPINGi    LJR
+    if(tau_nh>0.)then
+      do k=1,km
+        if(pfull(k)<rf_cutoff)then
+          rff(k) = (abs(dt)/tau_nh)*sin(0.5*pi*log(rf_cutoff/pfull(k))/log(rf_cutoff/ptop))**2
+          do i=is, ie
+            w2(i,k) = w2(i,k)/(1. + rff(k))
+          enddo
+        endif
+      enddo
+    end if
+
     do i=is, ie
        pe(i,1) = 0.
     enddo
@@ -1303,6 +1154,7 @@ CONTAINS
 
     do i=is, ie
            p1(i) = ( pe(i,km) + 2.*pe(i,km+1) )*r3
+           pp2(i,km) = p1(i)
 #ifdef MOIST_CAPPA
        dz2(i,km) = -dm2(i,km)*rgas*pt2(i,km)*exp((cp2(i,km)-1.)*log(max(p_fac*pm2(i,km),p1(i)+pm2(i,km))))
 #else
@@ -1313,6 +1165,7 @@ CONTAINS
     do k=km-1, 1, -1
        do i=is, ie
           p1(i) = (pe(i,k) + bb(i,k)*pe(i,k+1) + g_rat(i,k)*pe(i,k+2))*r3 - g_rat(i,k)*p1(i)
+          pp2(i,k) = p1(i)
 #ifdef MOIST_CAPPA
           dz2(i,k) = -dm2(i,k)*rgas*pt2(i,k)*exp((cp2(i,k)-1.)*log(max(p_fac*pm2(i,k),p1(i)+pm2(i,k))))
 #else
@@ -1324,9 +1177,11 @@ CONTAINS
  end subroutine SIM1_solver
 
  subroutine SIM_solver(dt,  is,  ie, km, rgas, gama, gm2, cp2, kappa, pe2, dm2,   &
-                       pm2, pem, w2, dz2, pt2, ws, alpha, p_fac, scale_m)
+                       pm2, pem, w2, dz2, pt2, ws, alpha, p_fac, scale_m, &
+                       rf_cutoff, tau_nh, pfull, ptop)  !LJR
    integer, intent(in):: is, ie, km
    real, intent(in):: dt, rgas, gama, kappa, p_fac, alpha, scale_m
+   real, intent(in):: rf_cutoff, tau_nh, pfull(km), ptop     !LJR
    real, intent(in), dimension(is:ie,km):: dm2, pt2, pm2, gm2, cp2
    real, intent(in )::  ws(is:ie)
    real, intent(in ), dimension(is:ie,km+1):: pem
@@ -1337,6 +1192,7 @@ CONTAINS
    real, dimension(is:ie,km+1):: pp
    real, dimension(is:ie):: p1, wk1, bet
    real  beta, t2, t1g, rdt, ra, capa1
+   real, dimension(km) :: rff
    integer i, k
 
     beta = 1. - alpha
@@ -1441,6 +1297,18 @@ CONTAINS
          w2(i,k) = w2(i,k) - gam(i,k+1)*w2(i,k+1)
       enddo
     enddo
+
+    ! RAYLEIGH DAMPINGi    LJR
+    if(tau_nh>0.)then
+      do k=1,km
+        if(pfull(k)<rf_cutoff)then
+          rff(k) = (abs(dt)/tau_nh)*sin(0.5*pi*log(rf_cutoff/pfull(k))/log(rf_cutoff/ptop))**2
+          do i=is, ie
+            w2(i,k) = w2(i,k)/(1. + rff(k))
+          enddo
+        endif
+      enddo
+    end if
 
     do i=is, ie
        pe2(i,1) = 0.

@@ -24,8 +24,8 @@
 
 module fv_diagnostics_mod
 
- use constants_mod,      only: grav, rdgas, rvgas, pi=>pi_8, kappa, WTMAIR, WTMCO2, &
-                               hlv, cp_air, cp_vapor, TFREEZE
+ use constants_mod,      only: grav, rdgas, pi=>pi_8, kappa, WTMAIR, WTMCO2, &
+                               cp_vapor, TFREEZE
  use fv_arrays_mod,      only: radius ! scaled for small earth
  use fms_mod,            only: write_version_number
  use time_manager_mod,   only: time_type, get_date, get_time
@@ -49,9 +49,9 @@ module fv_diagnostics_mod
  use sat_vapor_pres_mod, only: compute_qs, lookup_es
 
  use fv_arrays_mod,      only: max_step
- use gfdl_mp_mod,        only: wqs1, qsmith_init, c_liq
+ use gfdl_mp_mod,        only: wqs1, qsmith_init
 
- use rad_ref_mod,        only: rad_ref
+ use rad_ref_mod 
  use fv_diag_column_mod, only: fv_diag_column_init, sounding_column, debug_column
 
  implicit none
@@ -62,7 +62,6 @@ module fv_diagnostics_mod
     module procedure  range_check_2d
  end interface range_check
 
- real, parameter:: missing_value = -1.e10
  real, parameter:: missing_value2 = -1.e3 ! for variables with many missing values
  real, parameter:: missing_value3 = 1.e10 ! for variables where we look for smallest values
  real :: ginv
@@ -75,7 +74,6 @@ module fv_diagnostics_mod
  type(time_type) :: fv_time
  type(fv_diag_type), pointer :: idiag
 
- logical :: module_is_initialized=.false.
  logical :: prt_minmax =.false.
  logical :: m_calendar
  integer  sphum, liq_wat, ice_wat, cld_amt    ! GFDL physics
@@ -936,6 +934,10 @@ contains
                   'non-hydrostatic pressure'//massdef_str, 'pa', missing_value=missing_value )
              id_ppnh = register_diag_field ( trim(field), 'ppnh', axes(1:3), Time,        &
                   'non-hydrostatic pressure perturbation', 'pa', missing_value=missing_value )
+              id_ppnh2 = register_diag_field ( trim(field), 'ppnh2', axes(1:3),Time,        &
+                  'non-hydrostatic pressure perturbation from sim_solver', 'pa',missing_value=missing_value )
+             id_ppenh = register_diag_field ( trim(field), 'ppenh',(/axes(1),axes(2),axes(4)/),Time,        &
+                  'non-hydrostatic edge pressure perturbation from sim_solver','pa',missing_value=missing_value )
           endif
           !--------------------
           ! 3D Condensate
@@ -1440,7 +1442,7 @@ contains
     real, allocatable :: ustm(:,:), vstm(:,:)
     real, allocatable :: slp(:,:), depress(:,:), ws_max(:,:), tc_count(:,:)
     real, allocatable :: u2(:,:), v2(:,:), x850(:,:), var1(:,:), var2(:,:), var3(:,:)
-    real, allocatable :: dmmr(:,:,:), dvmr(:,:,:)
+    real, allocatable :: dmmr(:,:,:), dvmr(:,:,:), wh(:,:,:)
     real height(2)
     real:: plevs(nplev), pout(nplev)
     integer:: idg(nplev), id1(nplev)
@@ -1651,6 +1653,7 @@ contains
     allocate ( u2(isc:iec,jsc:jec) )
     allocate ( v2(isc:iec,jsc:jec) )
     allocate ( wk(isc:iec,jsc:jec,npz) )
+    allocate ( wh(isc:iec,jsc:jec,npz+1) )
     if ( any(id_tracer_dmmr > 0) .or. any(id_tracer_dvmr > 0) ) then
         allocate ( dmmr(isc:iec,jsc:jec,1:npz) )
         allocate ( dvmr(isc:iec,jsc:jec,1:npz) )
@@ -2960,9 +2963,10 @@ contains
                do i=isc,iec
                   !wk(i,j,k) = wk(i,j,k) - a3(i,j,k)
 #ifdef GFS_PHYS
-                  wk(i,j,k) = wk(i,j,k)/(1.-sum(Atm(n)%q(i,j,k,2:Atm(n)%flagstruct%nwat))) !Need to correct
+                  wk(i,j,k)/(1.-sum(Atm(n)%q(i,j,k,2:Atm(n)%flagstruct%nwat)))
+                  !!Need to correct
 #endif
-                  tmp = Atm(n)%delp(i,j,k)/(Atm(n)%peln(i,k+1,j)-Atm(n)%peln(i,k,j))
+                  tmp =Atm(n)%delp(i,j,k)/(Atm(n)%peln(i,k+1,j)-Atm(n)%peln(i,k,j))
                   wk(i,j,k) = wk(i,j,k) - tmp
                enddo
                enddo
@@ -2970,6 +2974,34 @@ contains
              if (id_ppnh > 0) used=send_data(id_ppnh, wk, Time)
            endif
 
+           if (id_ppnh2 > 0) then
+             do k=1,npz
+               do j=jsc,jec
+               do i=isc,iec
+                  !wk(i,j,k) = wk(i,j,k) - a3(i,j,k)
+#ifdef GFS_PHYS
+                  !wk(i,j,k) = wk(i,j,k)/(1.-sum(Atm(n)%q(i,j,k,2:Atm(n)%flagstruct%nwat))) !Need to correct
+#endif
+                  !tmp = Atm(n)%delp(i,j,k)/(Atm(n)%peln(i,k+1,j)-Atm(n)%peln(i,k,j))
+                  !wk(i,j,k) = wk(i,j,k) - tmp
+                   wk(i,j,k) = Atm(n)%ppnh(i,j,k)
+               enddo
+               enddo
+             enddo
+             if (id_ppnh2 > 0) used=send_data(id_ppnh2, wk, Time)
+           endif
+
+           if (id_ppenh > 0) then
+             do k=1,npz+1
+               do j=jsc,jec
+               do i=isc,iec
+                   wh(i,j,k) = Atm(n)%ppenh(i,j,k)
+               enddo
+               enddo
+             enddo
+             if (id_ppenh > 0) used=send_data(id_ppenh, wh, Time)
+           endif
+           deallocate(wh)
 !           if (allocated(a3)) deallocate(a3)
 
         endif
@@ -3143,11 +3175,33 @@ contains
 
           if (.not. allocated(a3)) allocate(a3(isc:iec,jsc:jec,npz))
 
-          call rad_ref(Atm(n)%q, Atm(n)%pt, Atm(n)%delp, Atm(n)%peln, Atm(n)%delz, &
+          if ( Atm(n)%flagstruct%nwat .ne. 6) then
+           call rad_ref(Atm(n)%q, Atm(n)%pt, Atm(n)%delp, Atm(n)%peln, Atm(n)%delz, &
                a3, a2, allmax, Atm(n)%bd, npz, Atm(n)%ncnst, Atm(n)%flagstruct%hydrostatic, &
                zvir, .false., .false., .false., .true., Atm(n)%flagstruct%do_inline_mp, &
                sphum, liq_wat, ice_wat, rainwat, snowwat, graupel, mp_top) ! GFDL MP has constant N_0 intercept
-
+          else 
+            xam_r = pi*rhor/6.
+            xbm_r = 3.
+            xmu_r = 0.
+            xam_s = pi*rhos/6.
+            xbm_s = 3.
+            xmu_s = 0.
+            xam_g = pi*rhog/6.
+            xbm_g = 3.
+            xmu_g = 0.
+            call radar_init()
+            do j=jsc,jec
+             do i=isc,iec
+               do k = 1,npz
+                 wk(i,j,k) = -Atm(n)%delp(i,j,k)/(Atm(n)%delz(i,j,k)*grav)*rdgas*          &
+                              Atm(n)%pt(i,j,k)*(1.+zvir*Atm(n)%q(i,j,k,sphum))
+               enddo
+               call refl10cm_gfdl(Atm(n)%q(i,j,:,sphum),Atm(n)%q(i,j,:,rainwat),Atm(n)%q(i,j,:,snowwat), &
+                             Atm(n)%q(i,j,:,graupel), Atm(n)%pt(i,j,:), wk(i,j,:), a3(i,j,:),1,npz,i,j,.true.)
+             enddo
+            enddo
+          endif
           if (id_dbz > 0) used=send_data(id_dbz, a3, time)
           if (id_maxdbz > 0) used=send_data(id_maxdbz, a2, time)
 
@@ -3194,10 +3248,10 @@ contains
              used=send_data(id_dbz_m10C, a2, time)
           endif
 
-          if (prt_minmax) then
-             call mpp_max(allmax)
-             if (master) write(*,*) 'max reflectivity = ', allmax, ' dBZ'
-          endif
+          !if (prt_minmax) then
+          !   call mpp_max(allmax)
+          !   if (master) write(*,*) 'max reflectivity = ', allmax, ' dBZ'
+          !endif
 
           deallocate(a3)
        endif
@@ -4359,7 +4413,7 @@ contains
 
  k2 = max(12, km/2+1)
 
-!$OMP parallel do default(none) shared(k2,is,ie,js,je,km,kd,id,log_p,peln,a2,wz)   &
+!$OMP parallel do default(none) shared(k2,is,ie,js,je,km,kd,id,log_p,peln,a2,wz,missing_value)   &
 !$OMP             private(i,j,n,k,k1,l,pn,gz)
  do j=js,je
     do i=is,ie

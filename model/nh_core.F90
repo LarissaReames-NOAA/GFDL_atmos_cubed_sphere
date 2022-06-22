@@ -42,9 +42,10 @@ CONTAINS
   subroutine Riem_Solver3(ms, dt,   is,   ie,   js, je, km, ng,    &
                           isd, ied, jsd, jed, akap, cappa, cp,     &
                           ptop, zs, q_con, w,  delz, pt,  &
-                          delp, zh, pe, ppe, pk3, pk, peln, &
+!                          delp, zh, pe, ppe, pk3, pk, peln, &
+                          delp, zh, pe, ppe, ppnh, pk3,ppenh, pk, peln, &
                           ws, scale_m,  p_fac, a_imp, &
-                          use_logp, last_call, fp_out)
+                          use_logp, last_call, fp_out, rf_cutoff, tau_nh, pfull)    !LJR
 !--------------------------------------------
 ! !OUTPUT PARAMETERS
 ! Ouput: gz: grav*height at edges
@@ -54,7 +55,7 @@ CONTAINS
    integer, intent(in):: ms, is, ie, js, je, km, ng
    integer, intent(in):: isd, ied, jsd, jed
    real, intent(in):: dt         ! the BIG horizontal Lagrangian time step
-   real, intent(in):: akap, cp, ptop, p_fac, a_imp, scale_m
+   real, intent(in):: akap, cp, ptop, p_fac, a_imp, scale_m, rf_cutoff, tau_nh, pfull(km)  !LJR
    real, intent(in):: zs(isd:ied,jsd:jed)
    logical, intent(in):: last_call, use_logp, fp_out
    real, intent(in):: ws(is:ie,js:je)
@@ -66,11 +67,13 @@ CONTAINS
    real, intent(out):: peln(is:ie,km+1,js:je)          ! ln(pe)
    real, intent(out), dimension(isd:ied,jsd:jed,km+1):: ppe
    real, intent(out):: delz(is:ie,js:je,km)
+   real, intent(out):: ppenh(is:ie,js:je,km+1)
    real, intent(out):: pk(is:ie,js:je,km+1)
    real, intent(out):: pk3(isd:ied,jsd:jed,km+1)
+   real, intent(out):: ppnh(is:ie,js:je,km)
 ! Local:
   real, dimension(is:ie,km):: dm, dz2, pm2, w2, gm2, cp2
-  real, dimension(is:ie,km+1)::pem, pe2, peln2, peg, pelng
+  real, dimension(is:ie,km+1)::pem, pe2, peln2, peg, pelng, pp2
   real gama, rgrav, ptk, peln1
   integer i, j, k
 
@@ -79,10 +82,10 @@ CONTAINS
    peln1 = log(ptop)
      ptk = exp(akap*peln1)
 
-!$OMP parallel do default(none) shared(is,ie,js,je,km,delp,ptop,peln1,pk3,ptk,akap,rgrav,zh,pt, &
-!$OMP                                  w,a_imp,dt,gama,ws,p_fac,scale_m,ms,delz,last_call,  &
-!$OMP                                  peln,pk,fp_out,ppe,use_logp,zs,pe,cappa,q_con )          &
-!$OMP                          private(cp2, gm2, dm, dz2, pm2, pem, peg, pelng, pe2, peln2, w2)
+!$OMP parallel do default(none) shared(is,ie,js,je,km,delp,ptop,peln1,pk3,ppenh,ptk,akap,rgrav,zh,pt, &
+!$OMP                                  w,a_imp,dt,gama,ws,p_fac,scale_m,ms,delz,last_call,rf_cutoff,tau_nh,pfull,  &     !LJR
+!$OMP                                  peln,pk,fp_out,ppe,use_logp,zs,pe,cappa,q_con,ppnh )          &
+!$OMP                          private(cp2, gm2, dm, dz2, pm2, pem, peg, pelng, pe2, peln2, w2,pp2)
    do 2000 j=js, je
 
       do k=1,km
@@ -145,12 +148,14 @@ CONTAINS
            call RIM_2D(ms, dt, is, ie, km, rdgas, gama, gm2, pe2,   &
                        dm, pm2, w2, dz2, pt(is:ie,j,1:km), ws(is,j), .false.)
       elseif ( a_imp > 0.999 ) then
-           call SIM1_solver(dt, is, ie, km, rdgas, gama, gm2, cp2, akap, pe2, dm,   &
-                            pm2, pem, w2, dz2, pt(is:ie,j,1:km), ws(is,j), p_fac)
+           call SIM1_solver(dt, is, ie, km, rdgas, gama, gm2, cp2, akap, pe2, pp2, dm,   &
+                            pm2, pem, w2, dz2, pt(is:ie,j,1:km), ws(is,j), p_fac, &
+                            rf_cutoff, tau_nh, pfull(1:km), ptop)    !LJR
       else
            call SIM_solver(dt, is, ie, km, rdgas, gama, gm2, cp2, akap, pe2, dm,  &
                            pm2, pem, w2, dz2, pt(is:ie,j,1:km), ws(is,j), &
-                           a_imp, p_fac, scale_m)
+                           a_imp, p_fac, scale_m, &
+                           rf_cutoff, tau_nh, pfull, ptop)   !LJR
       endif
 
       do k=1, km
@@ -180,6 +185,12 @@ CONTAINS
          do k=1,km+1
          do i=is, ie
             ppe(i,j,k) = pe2(i,k)
+            ppenh(i,j,k) = pe2(i,k)
+         enddo
+         enddo
+         do k = 1,km
+         do i=is,ie
+           ppnh(i,j,k) = pp2(i,k)
          enddo
          enddo
       endif

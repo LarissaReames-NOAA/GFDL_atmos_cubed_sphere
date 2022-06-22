@@ -30,6 +30,7 @@
            id_ppt, id_ts, id_tb, id_ctt, id_pmask, id_pmaskv2,    &
            id_delp, id_delz, id_iw, id_lw,                 &
            id_pfhy, id_pfnh, id_ppnh,                             &
+           id_ppnh2, id_ppenh,                                    &
            id_qn, id_qn200, id_qn500, id_qn850, id_qp,            &
            id_qdt, id_acly, id_acl, id_acl2,                              &
            id_dbz, id_maxdbz, id_basedbz, id_dbz4km, id_dbztop, id_dbz_m10C, &
@@ -87,6 +88,7 @@
      integer :: id_t_dt_phys, id_qv_dt_phys, id_ql_dt_phys, id_qi_dt_phys, id_u_dt_phys, id_v_dt_phys
      integer :: id_qr_dt_phys, id_qg_dt_phys, id_qs_dt_phys
      integer :: id_liq_wat_dt_phys, id_ice_wat_dt_phys
+     integer :: id_dudt, id_dvdt, id_dtdt, id_dqdt
      integer :: id_intqv, id_intql, id_intqi, id_intqr, id_intqs, id_intqg
 
 ! ESM/CM 3-D diagostics

@@ -151,6 +151,8 @@ public :: fv_phys, fv_nudge
   integer :: id_vr_k, id_rain, id_rain_k, id_pblh
   integer :: id_dqdt, id_dTdt, id_dudt, id_dvdt
   integer :: id_qflux, id_hflux
+  integer :: id_dtdt_sg, id_dudt_sg, id_dvdt_sg, id_dqdt_sg, id_dwdt_sg
+  integer :: id_dtdt_mp, id_dudt_mp, id_dvdt_mp, id_dqdt_mp, id_dwdt_mp
   real, allocatable:: prec_total(:,:)
   real    :: missing_value = -1.e10
 
@@ -231,7 +233,9 @@ contains
     real, parameter:: sigb = 0.7
     logical:: no_tendency = .true.
     integer, parameter:: nmax = 2
-    real, allocatable:: u_dt(:,:,:), v_dt(:,:,:), t_dt(:,:,:), q_dt(:,:,:,:)
+    real :: u_dt(is-ng:ie+  ng,js-ng:je+1+ng,npz), v_dt(is-ng:ie+ng+1,js-ng:je+ng,npz)
+    real :: q_dt(is:ie,js:je,npz,nq)
+    real, dimension(is:ie,js:je,npz) :: t_dt, w_dt, t_dt_mp, q_dt_mp
     real, dimension(is:ie,npz):: dp2, pm, rdelp, u2, v2, t2, q2, du2, dv2, dt2, dq2
     real:: lcp(is:ie), den(is:ie)
     real:: rain(is:ie,js:je), rain2(is:ie), zint(is:ie,1:npz+1)
@@ -272,13 +276,16 @@ contains
     isd = is-ng;   ied = ie + ng
     jsd = js-ng;   jed = je + ng
 
-     allocate ( u_dt(isd:ied,jsd:jed,npz) )
-     allocate ( v_dt(isd:ied,jsd:jed,npz) )
-     allocate ( t_dt(is:ie,js:je,npz) )
-     allocate ( q_dt(is:ie,js:je,npz,nq) )
+ !    allocate ( u_dt(isd:ied,jsd:jed,npz) )
+ !    allocate ( v_dt(isd:ied,jsd:jed,npz) )
+ !    allocate ( w_dt(is:ie,js:je,npz) )
+ !    allocate ( t_dt(is:ie,js:je,npz) )
+ !    allocate ( q_dt(is:ie,js:je,npz,nq) )
+ !    allocate ( t_dt_mp(is:ie,js:je,npz) )
+ !    allocate ( q_dt_mp(is:ie,js:je,npz) )
 
 ! Place the memory in the optimal shared mem space!
-!$OMP parallel do default(none) shared(isd,ied,jsd,jed,npz,is,ie,js,je,nq,u_dt,v_dt,t_dt,q_dt)
+!$OMP parallel do default(none) shared(isd,ied,jsd,jed,npz,is,ie,js,je,nq,u_dt,v_dt,t_dt,q_dt,w_dt,t_dt_mp,q_dt_mp)
      do k=1, npz
         do j=jsd, jed
            do i=isd, ied
@@ -290,6 +297,9 @@ contains
         do j=js, je
            do i=is, ie
               t_dt(i,j,k) = 0.
+              w_dt(i,j,k) = 0.
+              t_dt_mp(i,j,k) = 0.
+              q_dt_mp(i,j,k) = 0.
            enddo
         enddo
         do n=1,nq
@@ -305,7 +315,7 @@ contains
         if (is_master() .and. first_call) print*, " Calling fv_subgrid_z ", fv_sg_adj, flagstruct%n_sponge
          call fv_subgrid_z(isd, ied, jsd, jed, is, ie, js, je, npz, min(6,nq), pdt,  &
                            fv_sg_adj, nwat, delp, pe, peln, pkz, pt, q, ua, va,  &
-                           hydrostatic, w, delz, u_dt, v_dt, t_dt, q_dt, flagstruct%n_sponge )
+                           hydrostatic, w, delz, u_dt, v_dt, w_dt, t_dt, q_dt, flagstruct%n_sponge )
          no_tendency = .false.
     endif
 
@@ -412,9 +422,8 @@ contains
           enddo
        endif
        call K_warm_rain(pdt, is, ie, js, je, ng, npz, nq, zvir, ua, va,   &
-                        w, u_dt, v_dt, q, pt, delp, delz, &
+                        w, u_dt, v_dt, t_dt_mp, q_dt_mp, q, pt, delp, delz, &
                         pe, peln, pk, ps, rain, Time, flagstruct%hydrostatic)
-
        if( K_sedi_transport )  no_tendency = .false.
        if (do_terminator) then
           do k=1,npz
@@ -578,16 +587,23 @@ contains
 
 
     if (id_dudt > 0) then
-       used=send_data(id_dudt, u_dt(is:ie,js:je,npz), time)
+       used=send_data(id_dudt, u_dt(is:ie,js:je,1:npz), time)
     endif
     if (id_dvdt > 0) then
-       used=send_data(id_dvdt, v_dt(is:ie,js:je,npz), time)
+       used=send_data(id_dvdt,v_dt(is:ie,js:je,1:npz), time)
     endif
     if (id_dtdt > 0) then
        used=send_data(id_dtdt, t_dt(:,:,:), time)
     endif
     if (id_dqdt > 0) then
        used=send_data(id_dqdt, q_dt(:,:,:,sphum), time)
+    endif
+
+    if (id_dtdt_mp > 0) then
+       used=send_data(id_dtdt_mp, t_dt_mp(:,:,:), time)
+    endif
+    if (id_dqdt_mp > 0) then
+       used=send_data(id_dqdt_mp, q_dt_mp(:,:,:), time)
     endif
 
 
@@ -604,10 +620,10 @@ contains
 
                         call timing_off('UPDATE_PHYS')
     endif
-    deallocate ( u_dt )
-    deallocate ( v_dt )
-    deallocate ( t_dt )
-    deallocate ( q_dt )
+    !deallocate ( u_dt )
+    !deallocate ( v_dt )
+    !deallocate ( t_dt )
+    !deallocate ( q_dt )
 
     first_call = .false.
 
@@ -1649,6 +1665,26 @@ endif
          'Physics T tendency', 'K/s', missing_value=missing_value)
     id_dqdt = register_diag_field( mod_name, 'dqdt', axes(1:3), time, &
          'Physics Q tendency', 'kg/kg/s', missing_value=missing_value)
+    id_dudt_sg = register_diag_field( mod_name, 'sg_dudt', axes(1:3), time, &
+         'Subgrid U tendency', 'm/s/s', missing_value=missing_value)
+    id_dvdt_sg = register_diag_field( mod_name, 'sg_dvdt', axes(1:3), time, &
+         'Subgrid V tendency', 'm/s/s', missing_value=missing_value)
+    id_dwdt_sg = register_diag_field( mod_name, 'sg_dwdt', axes(1:3), time, &
+         'Subgrid W tendency', 'm/s/s', missing_value=missing_value)
+    id_dtdt_sg = register_diag_field( mod_name, 'sg_dtdt', axes(1:3), time, &
+         'Subgrid T tendency', 'K/s', missing_value=missing_value)
+    id_dqdt_sg = register_diag_field( mod_name, 'sg_dqdt', axes(1:3), time, &
+         'Subgrid Q tendency', 'kg/kg/s', missing_value=missing_value)
+    id_dudt_mp = register_diag_field( mod_name, 'mp_dudt', axes(1:3), time, &
+         'MP U tendency', 'm/s/s', missing_value=missing_value)
+    id_dvdt_mp = register_diag_field( mod_name, 'mp_dvdt', axes(1:3), time, &
+         'MP V tendency', 'm/s/s', missing_value=missing_value)
+    id_dwdt_mp = register_diag_field( mod_name, 'mp_dwdt', axes(1:3), time, &
+         'MP W tendency', 'm/s/s', missing_value=missing_value)
+    id_dtdt_mp = register_diag_field( mod_name, 'mp_dtdt', axes(1:3), time, &
+         'MP T tendency', 'K/s', missing_value=missing_value)
+    id_dqdt_mp = register_diag_field( mod_name, 'mp_dqdt', axes(1:3), time, &
+         'MP Q tendency', 'kg/kg/s', missing_value=missing_value)
 
 ! Initialize mixed layer ocean model
     if( .not. allocated ( ts0) ) allocate ( ts0(is:ie,js:je) )
@@ -1741,13 +1777,13 @@ endif
  end function g0_sum
 
  subroutine K_warm_rain(dt, is, ie, js, je, ng, km, nq, zvir, u, v, w, u_dt, v_dt, &
-                        q, pt, dp, delz, pe, peln, pk, ps, rain, Time, hydrostatic)
+                        t_dt, q_dt,q, pt, dp, delz, pe, peln, pk, ps, rain, Time, hydrostatic)
  type (time_type), intent(in) :: Time
  real, intent(in):: dt ! time step
  real, intent(in):: zvir
  integer, intent(in):: is, ie, js, je, km, ng, nq
  logical, intent(in) :: hydrostatic
- real, intent(inout), dimension(is-ng:ie+ng,js-ng:je+ng,km):: dp, pt, w, u, v, u_dt, v_dt
+ real, intent(inout), dimension(is-ng:ie+ng,js-ng:je+ng,km):: dp, pt, w, u, v, u_dt, v_dt,t_dt,q_dt
  real, intent(inout), dimension(is   :ie   ,js   :je   ,km):: delz
  real, intent(inout), dimension(is-ng:ie+ng,js-ng:je+ng,km,nq):: q
  real, INTENT(INOUT)::  pk(is:ie, js:je, km+1)
@@ -1758,7 +1794,7 @@ endif
 ! Local:
  real, parameter:: qv_min = 1.e-7
  real, parameter:: qc_min = 1.e-8
- real, allocatable:: vr_k(:,:,:)
+ real :: vr_k(is:ie,js:je,km)
  real, dimension(km):: t1, q0, q1, q2, q3, zm, drym, dm, dz, fac1, fac2
  real, dimension(km):: vr, qa, qb, qc, m1, u1, v1, w1, dgz, cvn, cvm
  real, dimension(km):: rho
@@ -1767,7 +1803,7 @@ endif
  integer i,j,k,n
  logical used
 
-      allocate ( vr_k(is:ie,js:je,km) )
+ !allocate ( vr_k(is:ie,js:je,km) )
 
  sdt = dt/real(K_cycle)
  rgrav = 1./grav
@@ -1907,6 +1943,8 @@ endif
   do k=1,km
      u_dt(i,j,k) = u_dt(i,j,k) + (u1(k)-u(i,j,k))/dt
      v_dt(i,j,k) = v_dt(i,j,k) + (v1(k)-v(i,j,k))/dt
+     t_dt(i,j,k) = t_dt(i,j,k) + (t1(k)-pt(i,j,k))/dt
+     ! w_dt(i,j,k) = w_dt(i,j,k) + (w1(k)-w(i,j,k))/dt
      u(i,j,k) = u1(k)
      v(i,j,k) = v1(k)
      w(i,j,k) = w1(k)
@@ -1921,6 +1959,7 @@ endif
      q(i,j,k,  sphum) = q1(k) / dp(i,j,k)
      q(i,j,k,liq_wat) = q2(k) / dp(i,j,k)
      q(i,j,k,rainwat) = q3(k) / dp(i,j,k)
+     !q_dt(i,j,k) = q_dt(i,j,k) + (q1(k)-q(i,j,k,sphum))/dt
   enddo
   enddo   ! i-loop
 
@@ -1942,7 +1981,7 @@ endif
       used = send_data(id_vr_k, vr_k, time)
       call prt_maxmin('VR_K', vr_k, is, ie, js, je, 0,  km, 1.)
  endif
- deallocate (vr_k)
+ !deallocate (vr_k)
 
  end subroutine K_warm_rain
 

@@ -683,6 +683,8 @@ module fv_arrays_mod
                          !< jets; for higher-top hydrostatic models values between 5 and 15 should be
                          !< considered; and for non-hydrostatic models values of 10 or less should be
                          !< considered, with smaller values for higher-resolution.
+   real    :: tau_nh = 0.     !< Time scale (in seconds) for Rayleigh damping         LJR
+                              !< applied for nonhydrostatic cases. When nonzero should have tau = 0.
    real    :: rf_cutoff = 30.E2   !< Pressure below which no Rayleigh damping is applied if tau > 0.
    logical :: filter_phys = .false.
    logical :: dwind_2d = .false.   !< Whether to use a simpler & faster algorithm for interpolating
@@ -1232,6 +1234,8 @@ module fv_arrays_mod
     real, _ALLOCATABLE :: pk  (:,:,:)   _NULL  !< pe**cappa
     real, _ALLOCATABLE :: peln(:,:,:)   _NULL  !< ln(pe)
     real, _ALLOCATABLE :: pkz (:,:,:)   _NULL  !< finite-volume mean pk
+    real, _ALLOCATABLE :: ppnh (:,:,:)  _NULL  !< nh pressure from sim_solver
+    real, _ALLOCATABLE :: ppenh (:,:,:)  _NULL  !< edge nh pressure from sim_solver
 
 ! For phys coupling:
     real, _ALLOCATABLE :: u_srf(:,:)    _NULL  ! Surface u-wind
@@ -1457,6 +1461,8 @@ contains
     allocate (   Atm%pk(is:ie    ,js:je  , npz+1) )
     allocate ( Atm%peln(is:ie,npz+1,js:je) )
     allocate (  Atm%pkz(is:ie,js:je,npz) )
+    allocate (  Atm%ppnh(is:ie,js:je,npz) )
+    allocate (  Atm%ppenh(is:ie,js:je,npz+1) )
 
     allocate ( Atm%u_srf(is:ie,js:je) )
     allocate ( Atm%v_srf(is:ie,js:je) )
@@ -1820,6 +1826,8 @@ contains
     deallocate (   Atm%pk )
     deallocate ( Atm%peln )
     deallocate (  Atm%pkz )
+    deallocate ( Atm%ppnh )
+    if (allocated(Atm%ppenh)) deallocate ( Atm%ppenh )
     deallocate (   Atm%ts )
     deallocate ( Atm%phis )
     deallocate ( Atm%omga )

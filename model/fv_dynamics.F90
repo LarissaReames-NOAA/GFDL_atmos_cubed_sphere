@@ -1,4 +1,4 @@
-!***********************************************************************
+!ii***********************************************************************
 !*                   GNU Lesser General Public License
 !*
 !* This file is part of the FV3 dynamical core.
@@ -73,7 +73,7 @@ contains
   subroutine fv_dynamics(npx, npy, npz, nq_tot,  ng, bdt, consv_te, fill,               &
                         reproduce_sum, kappa, cp_air, zvir, ptop, ks, ncnst, n_split,     &
                         q_split, u, v, w, delz, hydrostatic, pt, delp, q,   &
-                        ps, pe, pk, peln, pkz, phis, q_con, omga, ua, va, uc, vc,          &
+                        ps, pe, pk, peln, pkz, phis, ppnh, ppenh, q_con, omga, ua, va, uc, vc,          &
                         ak, bk, mfx, mfy, cx, cy, ze0, hybrid_z, &
                         gridstruct, flagstruct, neststruct, idiag, bd, &
                         parent_grid, domain, inline_mp, diss_est, time_total)
@@ -120,6 +120,8 @@ contains
     real, intent(inout) :: pk  (bd%is:bd%ie,bd%js:bd%je, npz+1)          ! pe**kappa
     real, intent(inout) :: peln(bd%is:bd%ie,npz+1,bd%js:bd%je)           ! ln(pe)
     real, intent(inout) :: pkz (bd%is:bd%ie,bd%js:bd%je,npz)             ! finite-volume mean pk
+    real, intent(inout) :: ppnh(bd%is:bd%ie,bd%js:bd%je,npz)             ! nh pressure from sim_solver
+    real, intent(inout) :: ppenh(bd%is:bd%ie,bd%js:bd%je,npz+1)             ! nh edge pressure from sim_solver
     real, intent(inout):: q_con(bd%isd:, bd%jsd:, 1:)
 
 !-----------------------------------------------------------------------
@@ -485,7 +487,7 @@ contains
                                            call timing_on('DYN_CORE')
       call dyn_core(npx, npy, npz, ng, sphum, nq, mdt, n_map, n_split, zvir, cp_air, akap, cappa, grav, hydrostatic, &
                     u, v, w, delz, pt, q, delp, pe, pk, phis, ws, omga, ptop, pfull, ua, va,           &
-                    uc, vc, mfx, mfy, cx, cy, pkz, peln, q_con, ak, bk, ks, &
+                    uc, vc, mfx, mfy, cx, cy, pkz, peln, ppnh, ppenh, q_con, ak, bk, ks, &
                     gridstruct, flagstruct, neststruct, idiag, bd, &
                     domain, n_map==1, i_pack, last_step, diss_est, time_total)
                                            call timing_off('DYN_CORE')
