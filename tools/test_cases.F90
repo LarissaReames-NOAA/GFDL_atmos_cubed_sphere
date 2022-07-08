@@ -118,7 +118,7 @@
       integer :: sphum, theta_d
       real(kind=R_GRID), parameter :: one = 1.d0
       integer :: test_case = 11
-      logical :: bubble_do = .false.
+      logical :: bubble_do = .false., do_mountain = .false.
       logical :: do_rand_perts = .false.
       logical :: no_wind = .false.
       logical :: gaussian_dt = .false.
@@ -5636,23 +5636,49 @@ end subroutine terminator_tracers
 
         zvir = rvgas/rdgas - 1.
         p00 = 1000.E2
-        ps(:,:) = p00
-        phis(:,:) = 0.
+        icenter = npx/2
+        if (do_mountain) then
+        do j=jsd,jed
+        do i=isd,ied 
+          ! Witch of Agnesi hill
+           !phis(i,j) = (1500. /(1.+(float(i-icenter)/10.)**2))
+           dist=(i-icenter)*dx_const
+           phis(i,j) = mtn_hgt / (1 + dist**2/mtn_width**2)
+           ps(i,j) = p00*exp(-grav * phis(i,j)/(rdgas*iso_t))
+           gz(i,j,npz+1) = phis(i,j)
+           if (is_master()) then
+            print *, "Ahoj svete:  zs(",i,") =", phis(i,js)
+            print *, "Ahoj svete:  ps(",i,") =", ps(i,js)
+           endif
+          enddo
+        enddo
+       else 
+         phis(:,:) = 0.0
+         ps(:,:) = p00
+         gz(:,:,npz+1) = phis(:,:)
+       endif
+
         do j=js,je
            do i=is,ie
                 pk(i,j,1) = ptop**kappa
                 pe(i,1,j) = ptop
-              peln(i,1,j) = log(ptop)
+                peln(i,1,j) = log(ptop)
            enddo
         enddo
 
         do k=1,npz
-           do j=js,je
-              do i=is,ie
+           do j=jsd,jed
+              do i=isd,ied
                  delp(i,j,k) = ak(k+1)-ak(k) + ps(i,j)*(bk(k+1)-bk(k))
+              enddo
+           enddo
+        enddo
+        do k = 1,npz
+            do j=js,je
+               do i = is,ie
                  pe(i,k+1,j) = ak(k+1) + ps(i,j)*bk(k+1)
                  peln(i,k+1,j) = log(pe(i,k+1,j))
-                   pk(i,j,k+1) = exp( kappa*peln(i,k+1,j) )
+                 pk(i,j,k+1) = exp( kappa*peln(i,k+1,j) )
               enddo
            enddo
         enddo
@@ -5709,11 +5735,17 @@ end subroutine terminator_tracers
         q(:,:,:,:) = 0.
 
         do k=1,npz
-           do j=js,je
-              do i=is,ie
+           do j=jsd,jed
+              do i=isd,ied
                  pt(i,j,k)   = ts1(k)
                  th(i,j,k) = ths1(k)
                   q(i,j,k,1) = qs1(k)
+              enddo
+            enddo
+         enddo
+         do k=1,npz
+           do j=js,je
+              do i=is,ie
                  delz(i,j,k)=rdgas/grav*ts1(k)*(1.+zvir*qs1(k))*(peln(i,k,j)-peln(i,k+1,j))
                 enddo
              enddo
@@ -5826,8 +5858,8 @@ end subroutine terminator_tracers
           elseif (bubble_type == 3) then
             ! User entry of i/j bubble locations
           endif
-          do j = js, je
-          do i = is, ie
+          do j = jsd, jed
+          do i = isd, ied
           do k=1, npz
             do b = 1, n_bub
               call random_number(rand1)
@@ -5849,13 +5881,12 @@ end subroutine terminator_tracers
                     th(i,j,k) = th(i,j,k) + pturb*COS(.5*pi*RAD)**2 + 0.2 *(2.0*rand1-1.0)
                     pt(i,j,k) = th(i,j,k) * (pe1(k) / p1000mb)**(rdgas/cp_air)
                     q(i,j,k,1) = q(i,j,k,1) + bubble_q *COS(.5*pi*RAD)**2 +1.0E-7 *(2.0*rand2-1.0)
-                    delz(i,j,k)=rdgas/grav*pt(i,j,k)*(1.+zvir*q(i,j,k,1))*(peln(i,k,j)-peln(i,k+1,j))
+                    !delz(i,j,k)=rdgas/grav*pt(i,j,k)*(1.+zvir*q(i,j,k,1))*(peln(i,k,j)-peln(i,k+1,j))
                  else            
                     th(i,j,k) = th(i,j,k) + pturb*COS(.5*pi*RAD)**2
                      pt(i,j,k) = th(i,j,k) * (pe1(k) / p1000mb)**(rdgas/cp_air)
-                    print*, "pt at i, j, k =", pt(i,j,k), i, j, k
                     q(i,j,k,1) = q(i,j,k,1) + bubble_q *COS(.5*pi*RAD)**2
-                    delz(i,j,k)=rdgas/grav*pt(i,j,k)*(1.+zvir*q(i,j,k,1))*(peln(i,k,j)-peln(i,k+1,j))
+                    !delz(i,j,k)=rdgas/grav*pt(i,j,k)*(1.+zvir*q(i,j,k,1))*(peln(i,k,j)-peln(i,k+1,j))
                  endif
               ENDIF
              enddo !nbub
@@ -5870,7 +5901,20 @@ end subroutine terminator_tracers
         vc(:,jsd:jed,:) = v(isd:ied,:,:)
         vc(:,jed+1,:) = v(isd:ied,jed,:)
         va(:,:,:) = v(isd:ied,:,:)
-        
+
+          !4. Re-adjust phis and gz ; set up other variables
+           do j=jsd,jed
+              do i=isd,ied
+                 phis(i,j) = phis(i,j)*grav
+              enddo
+           enddo
+           do k=1,npz+1
+              do j=jsd,jed
+                 do i=isd,ied
+                    gz(i,j,k) = gz(i,j,k)*grav
+                 enddo
+              enddo
+           enddo
         end select
 
         is_ideal_case = .true.
@@ -5924,7 +5968,7 @@ end subroutine terminator_tracers
              t_profile, q_profile, ws_profile, bubble_t, bubble_q,  &
                                 bubble_zc, do_coriolis, iso_t, adi_th, us0,bubble_type,n_bub, &
                                 icenters,jcenters, bubble_rad_x, bubble_rad_y, do_rand_perts, &
-                                mtn_hgt, mtn_width
+                                mtn_hgt, mtn_width, do_mountain
 
 #include<file_version.h>
 
