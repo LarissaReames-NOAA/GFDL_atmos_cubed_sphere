@@ -158,6 +158,8 @@ module fv_control_mod
    use multi_gases_mod,     only: multi_gases_init, &
                                   read_namelist_multi_gases_nml
 #endif
+   use molecular_diffusion_mod,     only: molecular_diffusion_init, &
+                                          read_namelist_molecular_diffusion_nml
 
    implicit none
    private
@@ -184,12 +186,15 @@ module fv_control_mod
 
 !-------------------------------------------------------------------------------
 
-   subroutine fv_control_init(Atm, dt_atmos, this_grid, grids_on_this_pe, p_split)
+   subroutine fv_control_init(Atm, dt_atmos, this_grid, grids_on_this_pe, p_split, &
+                              nml_filename_in, skip_nml_read_in)
 
      type(fv_atmos_type), allocatable, intent(inout), target :: Atm(:)
      real,                intent(in)    :: dt_atmos
      integer,             intent(OUT)   :: this_grid
      logical, allocatable, intent(OUT) :: grids_on_this_pe(:)
+     character(len=32), optional,      intent(in)    :: nml_filename_in ! alternate nml
+     logical, optional,                intent(in)    :: skip_nml_read_in ! use previously loaded nml
 
      integer, intent(INOUT) :: p_split
      character(100) :: pe_list_name, errstring
@@ -213,6 +218,9 @@ module fv_control_mod
 
      real :: sdt
      integer :: unit, ens_root_pe, tile_id(1)
+
+     character(len=32) :: nml_filename = 'input.nml'
+     logical :: skip_nml_read = .false.
 
      !!!!!!!!!! POINTERS FOR READING NAMELISTS !!!!!!!!!!
 
@@ -278,6 +286,7 @@ module fv_control_mod
      real(kind=R_GRID) , pointer :: target_lon
 
      logical , pointer :: reset_eta
+     logical , pointer :: ignore_rst_cksum
      real    , pointer :: p_fac
      real    , pointer :: a_imp
      integer , pointer :: n_split
@@ -321,6 +330,7 @@ module fv_control_mod
      real    , pointer :: ke_bg
      real    , pointer :: consv_te
      real    , pointer :: tau
+     real    , pointer :: tau_w
      real    , pointer :: rf_cutoff
      logical , pointer :: filter_phys
      logical , pointer :: dwind_2d
@@ -340,6 +350,7 @@ module fv_control_mod
      logical , pointer :: reproduce_sum
      logical , pointer :: adjust_dry_mass
      logical , pointer :: fv_debug
+     logical , pointer :: fv_timers
      logical , pointer :: srf_init
      logical , pointer :: mountain
      logical , pointer :: remap_t
@@ -372,6 +383,7 @@ module fv_control_mod
      logical , pointer :: nudge_qv
      real,     pointer :: add_noise
      logical , pointer :: butterfly_effect
+     logical , pointer :: molecular_diffusion
      real,     pointer :: dz_min
      integer,  pointer :: psm_bc
 
@@ -392,7 +404,7 @@ module fv_control_mod
      integer, pointer :: nrows_blend
      logical, pointer :: regional_bcs_from_gsi
      logical, pointer :: write_restart_with_bcs
-     integer, pointer :: parent_tile, refinement, nestbctype, nestupdate, nsponge, ioffset, joffset
+     integer, pointer :: parent_tile, refinement, nestbctype, nestupdate, upoff, nsponge, ioffset, joffset
      real, pointer :: s_weight, update_blend
 
      character(len=16), pointer :: restart_resolution
@@ -407,6 +419,9 @@ module fv_control_mod
      this_grid = -1 ! default
      call mp_assign_gid
      ens_root_pe = mpp_root_pe()
+
+     if (present(nml_filename_in)) nml_filename = nml_filename_in
+     if (present(skip_nml_read_in)) skip_nml_read = skip_nml_read_in
 
      ! 1. read nesting namelists
      call read_namelist_nest_nml
@@ -482,9 +497,10 @@ module fv_control_mod
         if (n > 1) then
            Atm(n)%nml_filename = 'input_'//trim(pe_list_name)//'.nml'
         else
-           Atm(n)%nml_filename = 'input.nml'
+!          Atm(n)%nml_filename = 'input.nml'
+           Atm(n)%nml_filename = trim(nml_filename)
         endif
-        if (.not. file_exists(Atm(n)%nml_filename)) then
+        if (.not. file_exists(Atm(n)%nml_filename) .and. .not. skip_nml_read) then
            call mpp_error(FATAL, "Could not find nested grid namelist "//Atm(n)%nml_filename)
         endif
      enddo
@@ -514,16 +530,12 @@ module fv_control_mod
            Atm(n)%neststruct%joffset                = nest_joffsets(n)
            Atm(n)%neststruct%parent_tile            = tile_coarse(n)
            Atm(n)%neststruct%refinement             = nest_refine(n)
-
         else
-
            Atm(n)%neststruct%ioffset                = -999
            Atm(n)%neststruct%joffset                = -999
            Atm(n)%neststruct%parent_tile            = -1
            Atm(n)%neststruct%refinement             = -1
-
         endif
-
      enddo
 
      if (pecounter /= npes) then
@@ -550,7 +562,9 @@ module fv_control_mod
      else
         Atm(this_grid)%nml_filename = ''
      endif
-     call read_input_nml(Atm(this_grid)%nml_filename) !re-reads into internal namelist
+     if (.not. skip_nml_read) then
+       call read_input_nml(Atm(this_grid)%nml_filename) !re-reads into internal namelist
+     endif
 #endif
      call read_namelist_fv_grid_nml
      call read_namelist_fv_core_nml(Atm(this_grid)) ! do options processing here too?
@@ -558,6 +572,10 @@ module fv_control_mod
      call read_namelist_multi_gases_nml(Atm(this_grid)%nml_filename, &
            Atm(this_grid)%flagstruct%ncnst,  Atm(this_grid)%flagstruct%nwat)
 #endif
+     if ( Atm(this_grid)%flagstruct%molecular_diffusion ) then
+        call read_namelist_molecular_diffusion_nml(Atm(this_grid)%nml_filename, &
+                  Atm(this_grid)%flagstruct%ncnst,  Atm(this_grid)%flagstruct%nwat)
+     endif
      call read_namelist_test_case_nml(Atm(this_grid)%nml_filename)
      call mpp_get_current_pelist(Atm(this_grid)%pelist, commID=commID) ! for commID
      call mp_start(commID,halo_update_type)
@@ -648,7 +666,8 @@ module fv_control_mod
           Atm(this_grid)%flagstruct%grid_type,Atm(this_grid)%neststruct%nested, &
           Atm(this_grid)%layout,Atm(this_grid)%io_layout,Atm(this_grid)%bd,Atm(this_grid)%tile_of_mosaic, &
           Atm(this_grid)%gridstruct%square_domain,Atm(this_grid)%npes_per_tile,Atm(this_grid)%domain, &
-          Atm(this_grid)%domain_for_coupler,Atm(this_grid)%num_contact,Atm(this_grid)%pelist)
+          Atm(this_grid)%domain_for_coupler,Atm(this_grid)%domain_for_read,Atm(this_grid)%num_contact, &
+          Atm(this_grid)%pelist)
      call broadcast_domains(Atm,Atm(this_grid)%pelist,size(Atm(this_grid)%pelist))
      do n=1,ngrids
         tile_id = mpp_get_tile_id(Atm(n)%domain)
@@ -691,6 +710,7 @@ module fv_control_mod
         !reset to universal pelist
         call mpp_set_current_pelist( global_pelist )
         !Except for npes_nest_tile all arrays should be just the nests and should NOT include the top level
+
         call mpp_define_nest_domains(global_nest_domain, Atm(this_grid)%domain, &
              ngrids-1, nest_level=nest_level(2:ngrids) , &
              istart_coarse=nest_ioffsets(2:ngrids), jstart_coarse=nest_joffsets(2:ngrids), &
@@ -828,6 +848,7 @@ module fv_control_mod
        regional_bcs_from_gsi         => Atm%flagstruct%regional_bcs_from_gsi
        write_restart_with_bcs        => Atm%flagstruct%write_restart_with_bcs
        reset_eta                     => Atm%flagstruct%reset_eta
+       ignore_rst_cksum              => Atm%flagstruct%ignore_rst_cksum
        p_fac                         => Atm%flagstruct%p_fac
        a_imp                         => Atm%flagstruct%a_imp
        n_split                       => Atm%flagstruct%n_split
@@ -865,6 +886,7 @@ module fv_control_mod
        ke_bg                         => Atm%flagstruct%ke_bg
        consv_te                      => Atm%flagstruct%consv_te
        tau                           => Atm%flagstruct%tau
+       tau_w                         => Atm%flagstruct%tau_w
        rf_cutoff                     => Atm%flagstruct%rf_cutoff
        filter_phys                   => Atm%flagstruct%filter_phys
        dwind_2d                      => Atm%flagstruct%dwind_2d
@@ -884,6 +906,7 @@ module fv_control_mod
        reproduce_sum                 => Atm%flagstruct%reproduce_sum
        adjust_dry_mass               => Atm%flagstruct%adjust_dry_mass
        fv_debug                      => Atm%flagstruct%fv_debug
+       fv_timers                     => Atm%flagstruct%fv_timers
        srf_init                      => Atm%flagstruct%srf_init
        mountain                      => Atm%flagstruct%mountain
        remap_t                       => Atm%flagstruct%remap_t
@@ -916,6 +939,7 @@ module fv_control_mod
        nudge_qv                      => Atm%flagstruct%nudge_qv
        add_noise                     => Atm%flagstruct%add_noise
        butterfly_effect              => Atm%flagstruct%butterfly_effect
+       molecular_diffusion           => Atm%flagstruct%molecular_diffusion
        dz_min                        => Atm%flagstruct%dz_min
        psm_bc                        => Atm%flagstruct%psm_bc
        a2b_ord                       => Atm%flagstruct%a2b_ord
@@ -937,6 +961,7 @@ module fv_control_mod
        refinement                    => Atm%neststruct%refinement
        nestbctype                    => Atm%neststruct%nestbctype
        nestupdate                    => Atm%neststruct%nestupdate
+       upoff                         => Atm%neststruct%upoff
        nsponge                       => Atm%neststruct%nsponge
        s_weight                      => Atm%neststruct%s_weight
        ioffset                       => Atm%neststruct%ioffset
@@ -977,6 +1002,7 @@ module fv_control_mod
        ierr = check_nml_error(ios,'fv_nest_nml')
 
      end subroutine read_namelist_fv_nest_nml
+
 
      subroutine read_namelist_fv_grid_nml
 
@@ -1021,7 +1047,7 @@ module fv_control_mod
             use_logp, p_fac, a_imp, k_split, n_split, m_split, q_split, print_freq, write_3d_diags, &
             do_schmidt, do_cube_transform, &
             hord_mt, hord_vt, hord_tm, hord_dp, hord_tr, shift_fac, stretch_fac, target_lat, target_lon, &
-            kord_mt, kord_wz, kord_tm, kord_tr, fv_debug, fv_land, nudge, do_sat_adj, do_inline_mp, do_f3d, &
+            kord_mt, kord_wz, kord_tm, kord_tr, fv_debug, fv_timers, fv_land, nudge, do_sat_adj, do_inline_mp, do_f3d, &
             external_ic, read_increment, ncep_ic, nggps_ic, hrrrv3_ic, ecmwf_ic, use_new_ncep, use_ncep_phy, fv_diag_ic, &
             external_eta, res_latlon_dynamics, res_latlon_tracers, scale_z, w_max, z_min, lim_fac, &
             dddmp, d2_bg, d4_bg, vtdm4, trdm2, d_ext, delt_max, beta, non_ortho, n_sponge, &
@@ -1029,21 +1055,21 @@ module fv_control_mod
             dry_mass, grid_type, do_Held_Suarez, do_reed_physics, reed_cond_only, &
             consv_te, fill, filter_phys, fill_dp, fill_wz, fill_gfs, consv_am, RF_fast, &
             range_warn, dwind_2d, inline_q, z_tracer, reproduce_sum, adiabatic, do_vort_damp, no_dycore,   &
-            tau, tau_h2o, rf_cutoff, nf_omega, hydrostatic, fv_sg_adj, sg_cutoff, breed_vortex_inline,  &
+            tau, tau_w, tau_h2o, rf_cutoff, nf_omega, hydrostatic, fv_sg_adj, sg_cutoff, breed_vortex_inline,  &
             na_init, nudge_dz, hybrid_z, Make_NH, n_zs_filter, nord_zs_filter, full_zs_filter, reset_eta,         &
             pnats, dnats, dnrts, a2b_ord, remap_t, p_ref, d2_bg_k1, d2_bg_k2,  &
             c2l_ord, dx_const, dy_const, umax, deglat,      &
             deglon_start, deglon_stop, deglat_start, deglat_stop, &
             phys_hydrostatic, use_hydro_pressure, make_hybrid_z, old_divg_damp, add_noise, butterfly_effect, &
-            dz_min, psm_bc, nested, twowaynest, nudge_qv, &
-            nestbctype, nestupdate, nsponge, s_weight, &
+            molecular_diffusion, dz_min, psm_bc, nested, twowaynest, nudge_qv, &
+            nestbctype, nestupdate, upoff, nsponge, s_weight, &
             check_negative, nudge_ic, halo_update_type, gfs_phil, agrid_vel_rst,     &
             do_uni_zfull, adj_mass_vmr, fac_n_spl, fhouri, update_blend, regional, bc_update_interval,  &
             regional_bcs_from_gsi, write_restart_with_bcs, nrows_blend,  &
             write_coarse_restart_files,&
             write_coarse_diagnostics,&
             write_only_coarse_intermediate_restarts, &
-            write_coarse_agrid_vel_rst, write_coarse_dgrid_vel_rst
+            write_coarse_agrid_vel_rst, write_coarse_dgrid_vel_rst, ignore_rst_cksum
 
 
        ! Read FVCORE namelist
@@ -1300,7 +1326,6 @@ module fv_control_mod
        call deallocate_fv_atmos_type(Atm(n))
        call deallocate_coarse_restart_type(Atm(n)%coarse_graining%restart)
     end do
-
 
  end subroutine fv_end
 !-------------------------------------------------------------------------------

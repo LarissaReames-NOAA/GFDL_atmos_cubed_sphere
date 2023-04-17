@@ -26,6 +26,7 @@ endif()
 option(OPENMP      "Enable OpenMP threading"                               OFF)
 option(32BIT       "Enable single precision (r4) arithmetic in FV3 dycore" ON)
 option(DEBUG       "Enable compiler definition -DDEBUG"                    OFF)
+option(MOVING_NEST "Enable compiler definition -DMOVING_NEST"              OFF)
 option(MULTI_GASES "Enable compiler definition -DMULTI_GASES"              OFF)
 option(USE_GFSL63  "Enable compiler definition -DUSE_GFSL63"               OFF)
 option(GFS_PHYS    "Enable compiler definition -DGFS_PHYS"                 OFF)
@@ -53,12 +54,14 @@ endif()
 
 if(NOT FMS_FOUND)
   find_package(FMS REQUIRED COMPONENTS ${kind})
-  add_library(fms ALIAS FMS::fms_${kind})
+  string(TOLOWER ${kind} kind_lower)
+  add_library(fms ALIAS FMS::fms_${kind_lower})
 endif()
 
 list(APPEND model_srcs
   model/a2b_edge.F90
   model/multi_gases.F90
+  model/molecular_diffusion.F90
   model/boundary.F90
   model/dyn_core.F90
   model/fv_arrays.F90
@@ -96,6 +99,7 @@ list(APPEND tools_srcs
   tools/fv_surf_map.F90
   tools/fv_timing.F90
   tools/init_hydro.F90
+  tools/module_diag_hailcast.F90
   tools/sim_nc_mod.F90
   tools/sorted_index.F90
   tools/test_cases.F90)
@@ -106,6 +110,7 @@ list(APPEND tools_srcs_extra
 list(APPEND driver_srcs
   driver/fvGFS/DYCORE_typedefs.F90
   driver/fvGFS/fv_nggps_diag.F90
+  driver/fvGFS/fv_ufs_restart_io.F90
   driver/fvGFS/atmosphere.F90)
 
 list(APPEND fv3_srcs ${model_srcs}
@@ -136,6 +141,10 @@ if(use_WRTCOMP)
   list(APPEND fv3_defs use_WRTCOMP)
   list(APPEND fv3_srcs ${tools_srcs_extra}
                        ${driver_srcs})
+endif()
+
+if(MOVING_NEST)
+  list(APPEND fv3_defs MOVING_NEST)
 endif()
 
 if(MULTI_GASES)
@@ -170,9 +179,10 @@ add_library(FV3::fv3 ALIAS fv3)
 
 set_property(SOURCE model/nh_utils.F90 APPEND_STRING PROPERTY COMPILE_FLAGS "${FAST}")
 set_property(SOURCE model/fv_mapz.F90  APPEND_STRING PROPERTY COMPILE_FLAGS "${FAST}")
+set_property(SOURCE tools/fv_diagnostics.F90  APPEND_STRING PROPERTY COMPILE_FLAGS "-O0")
 
 set_target_properties(fv3 PROPERTIES Fortran_MODULE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/include/fv3)
-target_include_directories(fv3 INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include/fv3>
+target_include_directories(fv3 PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include/fv3>
                                          $<INSTALL_INTERFACE:include/fv3>)
 
 target_include_directories(fv3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}

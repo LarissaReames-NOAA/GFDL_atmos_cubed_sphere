@@ -45,7 +45,11 @@ module nh_core_mod
 !   </tr>
 ! </table>
 
+#ifdef OVERLOAD_R4
+   use constantsR4_mod,     only: rdgas, cp_air, grav
+#else
    use constants_mod,     only: rdgas, cp_air, grav
+#endif
    use tp_core_mod,       only: fv_tp_2d
    use nh_utils_mod,      only: update_dz_c, update_dz_d, nh_bc
    use nh_utils_mod,      only: sim_solver, sim1_solver, sim3_solver
@@ -152,7 +156,7 @@ CONTAINS
             peg(i,k) = peg(i,k-1) + dm(i,k-1)*(1.-q_con(i,j,k-1))
             pelng(i,k) = log(peg(i,k))
 #endif
-!hmhj pk3 at interface , interface pk is using constant akap
+!< pk3 at interface , interface pk is using constant akap
             pk3(i,j,k) = exp(akap*peln2(i,k))
          enddo
       enddo
