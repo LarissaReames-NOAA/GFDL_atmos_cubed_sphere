@@ -146,7 +146,11 @@ module atmosphere_mod
 ! FMS modules:
 !-----------------
 use block_control_mod,      only: block_control_type
+#ifdef OVERLOAD_R4
+use constantsR4_mod,          only: cp_air, rdgas, grav, rvgas, kappa, pstd_mks
+#else
 use constants_mod,          only: cp_air, rdgas, grav, rvgas, kappa, pstd_mks
+#endif
 use time_manager_mod,       only: time_type, get_time, set_time, operator(+), &
                                   operator(-), operator(/), time_type_to_real
 use fms_mod,                only: error_mesg, FATAL,                 &
@@ -160,18 +164,21 @@ use mpp_mod,                only: mpp_error, stdout, FATAL, WARNING, NOTE, &
                                   input_nml_file, mpp_root_pe,    &
                                   mpp_npes, mpp_pe, mpp_chksum,   &
                                   mpp_get_current_pelist,         &
-                                  mpp_set_current_pelist, mpp_sync
+                                  mpp_set_current_pelist,         &
+                                  mpp_sync, mpp_sync_self, mpp_send, mpp_recv
 use mpp_parameter_mod,      only: EUPDATE, WUPDATE, SUPDATE, NUPDATE
-use mpp_domains_mod,        only: domain2d, mpp_update_domains
+use mpp_domains_mod,        only: CENTER, CORNER, NORTH, EAST, WEST, SOUTH
+use mpp_domains_mod,        only: domain2d, mpp_update_domains, mpp_global_field
+use mpp_domains_mod,        only: mpp_get_data_domain, mpp_get_compute_domain, mpp_get_global_domain
 use xgrid_mod,              only: grid_box_type
 use field_manager_mod,      only: MODEL_ATMOS
 use tracer_manager_mod,     only: get_tracer_index, get_number_tracers, &
                                   NO_TRACER, get_tracer_names
 use DYCORE_typedefs,        only: DYCORE_data_type
 #ifdef GFS_TYPES
-use GFS_typedefs,           only: IPD_data_type => GFS_data_type, kind_phys
+use GFS_typedefs,           only: IPD_data_type => GFS_data_type, IPD_control_type => GFS_control_type, kind_phys
 #else
-use IPD_typedefs,           only: IPD_data_type, kind_phys => IPD_kind_phys
+use IPD_typedefs,           only: IPD_data_type, IPD_control_type, kind_phys => IPD_kind_phys
 #endif
 use fv_iau_mod,             only: IAU_external_data_type
 #ifdef MULTI_GASES
@@ -187,11 +194,12 @@ use fv_eta_mod,         only: get_eta_level
 use fv_fill_mod,        only: fill_gfs
 use fv_dynamics_mod,    only: fv_dynamics
 use fv_nesting_mod,     only: twoway_nesting
+use boundary_mod,       only: fill_nested_grid
 use fv_diagnostics_mod, only: fv_diag_init, fv_diag, fv_time, prt_maxmin, prt_height
 use fv_nggps_diags_mod, only: fv_nggps_diag_init, fv_nggps_diag, fv_nggps_tavg
 use fv_restart_mod,     only: fv_restart, fv_write_restart
 use fv_timing_mod,      only: timing_on, timing_off
-use fv_mp_mod,          only: is_master
+use fv_mp_mod,          only: is_master, tile_fine
 use fv_sg_mod,          only: fv_subgrid_z
 use fv_update_phys_mod, only: fv_update_phys
 use fv_io_mod,          only: fv_io_register_nudge_restart
@@ -199,8 +207,6 @@ use fv_nwp_nudge_mod,   only: fv_nwp_nudge_init, fv_nwp_nudge_end, do_adiabatic_
 use fv_regional_mod,    only: start_regional_restart, read_new_bc_data, &
                               a_step, p_step, current_time_in_seconds
 use fv_grid_utils_mod,  only: g_sum
-
-use mpp_domains_mod, only:  mpp_get_data_domain, mpp_get_compute_domain
 use coarse_graining_mod, only: coarse_graining_init
 use coarse_grained_diagnostics_mod, only: fv_coarse_diag_init, fv_coarse_diag
 use coarse_grained_restart_files_mod, only: fv_coarse_restart_init
@@ -225,10 +231,14 @@ public :: atmosphere_resolution,   atmosphere_grid_bdry,         &
           atmosphere_get_bottom_layer, &
           atmosphere_nggps_diag,       &
           get_bottom_mass, get_bottom_wind,   &
-          get_stock_pe, set_atmosphere_pelist
+          get_stock_pe, set_atmosphere_pelist, &
+          get_nth_domain_info
 
 !--- physics/radiation data exchange routines
 public :: atmos_phys_driver_statein
+
+!--- coupling data exchange routines
+public :: atmosphere_fill_nest_cpl
 
 !-----------------------------------------------------------------------
 ! version number of this module
@@ -238,7 +248,7 @@ character(len=20)   :: mod_name = 'fvGFS/atmosphere_mod'
 
 !---- private data ----
   type (time_type) :: Time_step_atmos
-  public Atm, mygrid
+  public Atm, mygrid, p_split, dt_atmos  ! Share over to moving nest functions.
 
   !These are convenience variables for local use only, and are set to values in Atm%
   real    :: dt_atmos
@@ -249,10 +259,11 @@ character(len=20)   :: mod_name = 'fvGFS/atmosphere_mod'
   integer :: nq                       !  number of transported tracers
   integer :: sec, seconds, days
   integer :: id_dynam, id_fv_diag, id_subgridz
+
   logical :: cold_start = .false.     !  used in initial condition
 
   integer, dimension(:), allocatable :: id_tracerdt_dyn
-  integer :: sphum, liq_wat, rainwat, ice_wat, snowwat, graupel, cld_amt  ! condensate species tracer indices
+  integer :: sphum, liq_wat, rainwat, ice_wat, snowwat, graupel, hailwat, cld_amt  ! condensate species tracer indices
 
   integer :: mygrid = 1
   integer :: p_split = 1
@@ -281,7 +292,7 @@ contains
    use ccpp_static_api,   only: ccpp_physics_init
    use CCPP_data,         only: ccpp_suite,          &
                                 cdata => cdata_tile, &
-                                CCPP_interstitial
+                                GFDL_interstitial
 #ifdef OPENMP
    use omp_lib
 #endif
@@ -311,10 +322,10 @@ contains
    logical :: dycore_only  = .false.
    logical :: debug        = .false.
    logical :: sync         = .false.
-   integer, parameter     :: maxhr = 4096
-   real, dimension(maxhr) :: fdiag = 0.
-   real                   :: fhmax=384.0, fhmaxhf=120.0, fhout=3.0, fhouthf=1.0,avg_max_length=3600.
-   namelist /atmos_model_nml/ blocksize, chksum_debug, dycore_only, debug, sync, fdiag, fhmax, fhmaxhf, fhout, fhouthf, ccpp_suite, avg_max_length
+   logical :: ignore_rst_cksum = .false.
+   real    :: avg_max_length = 3600.
+   namelist /atmos_model_nml/ blocksize, chksum_debug, dycore_only, debug, sync, ccpp_suite, avg_max_length, &
+                              ignore_rst_cksum
    ! *DH 20210326
 
    !For regional
@@ -384,9 +395,10 @@ contains
    rainwat = get_tracer_index (MODEL_ATMOS, 'rainwat' )
    snowwat = get_tracer_index (MODEL_ATMOS, 'snowwat' )
    graupel = get_tracer_index (MODEL_ATMOS, 'graupel' )
+   hailwat = get_tracer_index (MODEL_ATMOS, 'hailwat' )
    cld_amt = get_tracer_index (MODEL_ATMOS, 'cld_amt')
 
-   if (max(sphum,liq_wat,ice_wat,rainwat,snowwat,graupel) > Atm(mygrid)%flagstruct%nwat) then
+   if (max(sphum,liq_wat,ice_wat,rainwat,snowwat,graupel,hailwat) > Atm(mygrid)%flagstruct%nwat) then
       call mpp_error (FATAL,' atmosphere_init: condensate species are not first in the list of &
                             &tracers defined in the field_table')
    endif
@@ -430,6 +442,15 @@ contains
 !--- allocate pref
    allocate(pref(npz+1,2), dum1d(npz+1))
 
+   ! DH* 20210326
+   ! First, read atmos_model_nml namelist section - this is a workaround to avoid
+   ! unnecessary additional changes to the input namelists, in anticipation of the
+   ! implementation of a generic interface for GFDL and CCPP fast physics soon
+   read(input_nml_file, nml=atmos_model_nml, iostat=io)
+   ierr = check_nml_error(io, 'atmos_model_nml')
+   !write(0,'(a)') "It's me, and my physics suite is '" // trim(ccpp_suite) // "'"
+   ! *DH 20210326
+
    call fv_restart(Atm(mygrid)%domain, Atm, seconds, days, cold_start, Atm(mygrid)%gridstruct%grid_type, mygrid)
 
    fv_time = Time
@@ -468,25 +489,6 @@ contains
 
    ! Do CCPP fast physics initialization before call to adiabatic_init (since this calls fv_dynamics)
 
-   ! DH* 20210326
-   ! First, read atmos_model_nml namelist section - this is a workaround to avoid
-   ! unnecessary additional changes to the input namelists, in anticipation of the
-   ! implementation of a generic interface for GFDL and CCPP fast physics soon
-#ifdef INTERNAL_FILE_NML
-   read(input_nml_file, nml=atmos_model_nml, iostat=io)
-   ierr = check_nml_error(io, 'atmos_model_nml')
-#else
-   unit = open_namelist_file ( )
-   ierr=1
-   do while (ierr /= 0)
-      read  (unit, nml=atmos_model_nml, iostat=io, end=10)
-      ierr = check_nml_error(io,'atmos_model_nml')
-   enddo
-10 call close_file (unit)
-#endif
-   !write(0,'(a)') "It's me, and my physics suite is '" // trim(ccpp_suite) // "'"
-   ! *DH 20210326
-
    ! For fast physics running over the entire domain, block
    ! and thread number are not used; set to safe values
    cdata%blk_no = 1
@@ -500,7 +502,7 @@ contains
 #endif
    ! Create interstitial data type for fast physics; for multi-gases physics,
    ! pass q(:,:,:,1:num_gas) as qvi, otherwise pass q(:,:,:,1:1) as 4D array
-   call CCPP_interstitial%create(Atm(mygrid)%bd%is, Atm(mygrid)%bd%ie, Atm(mygrid)%bd%isd, Atm(mygrid)%bd%ied, &
+   call GFDL_interstitial%create(Atm(mygrid)%bd%is, Atm(mygrid)%bd%ie, Atm(mygrid)%bd%isd, Atm(mygrid)%bd%ied, &
                                  Atm(mygrid)%bd%js, Atm(mygrid)%bd%je, Atm(mygrid)%bd%jsd, Atm(mygrid)%bd%jed, &
                                  Atm(mygrid)%npz, Atm(mygrid)%ng,                                              &
                                  dt_atmos, p_split, Atm(mygrid)%flagstruct%k_split,                            &
@@ -531,8 +533,8 @@ contains
       if (ierr/=0) then
          cdata%errmsg = ' atmosphere_dynamics: error in ccpp_physics_init for group fast_physics: ' // trim(cdata%errmsg)
          call mpp_error (FATAL, cdata%errmsg)
-      end if
-   end if
+      endif
+   endif
 
 !  --- initiate the start for a restarted regional forecast
    if ( Atm(mygrid)%gridstruct%regional .and. Atm(mygrid)%flagstruct%warm_start ) then
@@ -705,7 +707,7 @@ contains
        call timing_off('TWOWAY_UPDATE')
     endif
 
-    end do !p_split
+    enddo !p_split
     call mpp_clock_end (id_dynam)
 
 !-----------------------------------------------------
@@ -753,18 +755,18 @@ contains
 
     if (Atm(1)%idiag%id_u_dt_sg > 0) then
        used = send_data(Atm(1)%idiag%id_u_dt_sg, u_dt(isc:iec,jsc:jec,:), fv_time)
-    end if
+    endif
     if (Atm(1)%idiag%id_v_dt_sg > 0) then
        used = send_data(Atm(1)%idiag%id_v_dt_sg, v_dt(isc:iec,jsc:jec,:), fv_time)
-    end if
+    endif
     if (Atm(1)%idiag%id_t_dt_sg > 0) then
        t_dt(:,:,:) = rdt*(Atm(1)%pt(isc:iec,jsc:jec,:) - t_dt(:,:,:))
        used = send_data(Atm(1)%idiag%id_t_dt_sg, t_dt, fv_time)
-    end if
+    endif
     if (Atm(1)%idiag%id_qv_dt_sg > 0) then
        qv_dt(:,:,:) = rdt*(Atm(1)%q(isc:iec,jsc:jec,:,sphum) - qv_dt(:,:,:))
        used = send_data(Atm(1)%idiag%id_qv_dt_sg, qv_dt, fv_time)
-    end if
+    endif
 
 ! zero out t_dt for use as an accumulator
     t_dt = 0.
@@ -793,8 +795,8 @@ contains
       if (ierr/=0) then
          cdata%errmsg = ' atmosphere_dynamics: error in ccpp_physics_finalize for group fast_physics: ' // trim(cdata%errmsg)
          call mpp_error (FATAL, cdata%errmsg)
-      end if
-   end if
+      endif
+   endif
 
   ! initialize domains for writing global physics data
    if ( Atm(mygrid)%flagstruct%nudge ) call fv_nwp_nudge_end
@@ -848,7 +850,7 @@ contains
    else
        i_size = npx - 1
        j_size = npy - 1
-   end if
+   endif
 
  end subroutine atmosphere_resolution
 
@@ -891,7 +893,7 @@ contains
           lon(i-isc+1,j-jsc+1) = Atm(mygrid)%gridstruct%agrid_64(i,j,1)
           lat(i-isc+1,j-jsc+1) = Atm(mygrid)%gridstruct%agrid_64(i,j,2)
        enddo
-    end do
+    enddo
 
  end subroutine atmosphere_grid_ctr
 
@@ -899,7 +901,7 @@ contains
 !>@brief The subroutine 'atmosphere_grid_bdry' is an API to returns the
 !! longitude and latitude finite volume edges (grid box) for the current MPI-rank.
  subroutine atmosphere_grid_bdry (blon, blat, global)
-    real,    intent(out) :: blon(:,:), blat(:,:)   !< Unit: radian
+    real(kind=kind_phys),    intent(out) :: blon(:,:), blat(:,:)   !< Unit: radian
     logical, intent(in), optional :: global
 ! Local data:
     integer i,j
@@ -914,7 +916,7 @@ contains
           blon(i-isc+1,j-jsc+1) = Atm(mygrid)%gridstruct%grid(i,j,1)
           blat(i-isc+1,j-jsc+1) = Atm(mygrid)%gridstruct%grid(i,j,2)
        enddo
-    end do
+    enddo
 
  end subroutine atmosphere_grid_bdry
 
@@ -924,23 +926,42 @@ contains
  end subroutine set_atmosphere_pelist
 
 
+ subroutine get_nth_domain_info(n, layout, nx, ny, pelist)
+   integer, intent(in)  :: n
+   integer, intent(out) :: layout(2)
+   integer, intent(out) :: nx, ny
+   integer, pointer, intent(out) :: pelist(:)
+
+   layout(1:2) = Atm(n)%layout(1:2)
+   nx = Atm(n)%npx -1
+   ny = Atm(n)%npy -1
+   pelist => Atm(n)%pelist
+
+ end subroutine get_nth_domain_info
+
 !>@brief The subroutine 'atmosphere_domain' is an API to return
 !! the "domain2d" variable associated with the coupling grid and the
 !! decomposition for the current cubed-sphere tile.
 !>@detail Coupling is done using the mass/temperature grid with no halos.
- subroutine atmosphere_domain ( fv_domain, layout, regional, nested, pelist )
-   type(domain2d), intent(out) :: fv_domain
+ subroutine atmosphere_domain ( fv_domain, rd_domain, layout, regional, nested, &
+                                ngrids_atmos, mygrid_atmos, pelist )
+   type(domain2d), intent(out) :: fv_domain, rd_domain
    integer, intent(out) :: layout(2)
    logical, intent(out) :: regional
    logical, intent(out) :: nested
+   integer, intent(out) :: ngrids_atmos
+   integer, intent(out) :: mygrid_atmos
    integer, pointer, intent(out) :: pelist(:)
-!  returns the domain2d variable associated with the coupling grid
-!  note: coupling is done using the mass/temperature grid with no halos
+
+   integer :: n
 
    fv_domain = Atm(mygrid)%domain_for_coupler
+   rd_domain = Atm(mygrid)%domain_for_read
    layout(1:2) =  Atm(mygrid)%layout(1:2)
    regional = Atm(mygrid)%flagstruct%regional
    nested = ngrids > 1
+   ngrids_atmos = ngrids
+   mygrid_atmos = mygrid
    call set_atmosphere_pelist()
    pelist => Atm(mygrid)%pelist
 
@@ -2092,6 +2113,9 @@ contains
          IPD_Data(nb)%Statein%tgrs(ix,k) = _DBL_(_RL_(Atm(mygrid)%pt(i,j,k1)))
          IPD_Data(nb)%Statein%ugrs(ix,k) = _DBL_(_RL_(Atm(mygrid)%ua(i,j,k1)))
          IPD_Data(nb)%Statein%vgrs(ix,k) = _DBL_(_RL_(Atm(mygrid)%va(i,j,k1)))
+         if(associated(IPD_Data(nb)%Statein%wgrs) .and. .not. Atm(mygrid)%flagstruct%hydrostatic) then
+           IPD_Data(nb)%Statein%wgrs(ix,k) = _DBL_(_RL_(Atm(mygrid)%w(i,j,k1)))
+         endif
          IPD_Data(nb)%Statein%vvl(ix,k)  = _DBL_(_RL_(Atm(mygrid)%omga(i,j,k1)))
          IPD_Data(nb)%Statein%prsl(ix,k) = _DBL_(_RL_(Atm(mygrid)%delp(i,j,k1)))   ! Total mass
          if (Atm(mygrid)%flagstruct%do_skeb)IPD_Data(nb)%Statein%diss_est(ix,k) = _DBL_(_RL_(Atm(mygrid)%diss_est(i,j,k1)))
@@ -2317,5 +2341,145 @@ contains
    endif
 
  end subroutine atmos_phys_qdt_diag
+
+!>@brief The subroutine 'atmosphere_fill_grid_cpl' is to downscale/pass the
+!! coupling variables (e.g., sea surface temperature) received by the parent grid
+!! down into the nested grid(s).
+!>@details First the coupling field(s) is retreived from the IPD_data structure,
+!! and then loops through nested grids and call the fill_nest_grid_cpl to actually
+!! communicate and fill the nested grid(s) for coupling variables from its parent.
+!! After that the updated coupling field(s) is put back to the IPD_data structure.
+!! Note: Currently, only sea surface temperature is passed down into the nest(s).
+  subroutine atmosphere_fill_nest_cpl(Atm_block, IPD_control, IPD_data)
+    type(block_control_type), intent(in) :: Atm_block     !< Physics block layout
+    type(IPD_control_type), intent(in)   :: IPD_control   !< Physics metadata
+    type(IPD_data_type), intent(inout)   :: IPD_data(:)   !< Physics variable data
+
+    integer :: nb, blen, ix, i, j, n
+    character*255 :: message
+
+    ! Deal with tsfco (sea surface temperature)
+    if (IPD_control%cplocn2atm) then
+      ! Extract the coupling field
+      do nb = 1,Atm_block%nblks
+        blen = Atm_block%blksz(nb)
+        do ix = 1, blen
+          i = Atm_block%index(nb)%ii(ix)
+          j = Atm_block%index(nb)%jj(ix)
+          Atm(mygrid)%parent2nest_2d(i,j) = IPD_Data(nb)%Sfcprop%tsfco(ix)
+        enddo
+      enddo
+      ! Loop through and fill all nested grids
+      do n=2,ngrids
+        if (n==mygrid .or. mygrid==Atm(n)%parent_grid%grid_number) then
+          call fill_nested_grid_cpl(n, n==mygrid)
+        endif
+      enddo
+      ! Update the nested grids
+      if (Atm(mygrid)%neststruct%nested) then
+        do nb = 1,Atm_block%nblks
+          blen = Atm_block%blksz(nb)
+          do ix = 1, blen
+            i = Atm_block%index(nb)%ii(ix)
+            j = Atm_block%index(nb)%jj(ix)
+            if (IPD_data(nb)%Sfcprop%oceanfrac(ix) > 0.) then
+              IPD_data(nb)%Sfcprop%tsfco(ix) = Atm(mygrid)%parent2nest_2d(i,j)
+            endif
+          enddo
+        enddo
+      endif
+    endif
+
+    ! Deal with zorlwav (sea surface roughness length)
+    if (IPD_control%cplwav2atm) then
+      ! Extract the coupling field
+      do nb = 1,Atm_block%nblks
+        blen = Atm_block%blksz(nb)
+        do ix = 1, blen
+          i = Atm_block%index(nb)%ii(ix)
+          j = Atm_block%index(nb)%jj(ix)
+          Atm(mygrid)%parent2nest_2d(i,j) = IPD_Data(nb)%Sfcprop%zorlwav(ix)
+        enddo
+      enddo
+      ! Loop through and fill all nested grids
+      do n=2,ngrids
+        if (n==mygrid .or. mygrid==Atm(n)%parent_grid%grid_number) then
+          call fill_nested_grid_cpl(n, n==mygrid)
+        endif
+      enddo
+      ! Update the nested grids
+      if (Atm(mygrid)%neststruct%nested) then
+        do nb = 1,Atm_block%nblks
+          blen = Atm_block%blksz(nb)
+          do ix = 1, blen
+            i = Atm_block%index(nb)%ii(ix)
+            j = Atm_block%index(nb)%jj(ix)
+            if (IPD_data(nb)%Sfcprop%oceanfrac(ix) > 0.) then
+              IPD_data(nb)%Sfcprop%zorlwav(ix) = Atm(mygrid)%parent2nest_2d(i,j)
+            ! IPD_data(nb)%Sfcprop%zorlw(ix) = Atm(mygrid)%parent2nest_2d(i,j)
+            endif
+          enddo
+        enddo
+      endif
+    endif
+
+  end subroutine atmosphere_fill_nest_cpl
+
+!>@brief The subroutine 'fill_nested_grid_cpl' fills the nested grid for
+!! coupling variables from its parent grid
+!>@details Fill parent2nest_2d on the nested grid with values from its parent.
+  subroutine fill_nested_grid_cpl(this_grid, proc_in)
+    integer, intent(in) :: this_grid
+    logical, intent(in), optional :: proc_in
+
+    real, allocatable :: g_dat(:,:,:)
+    integer :: p, sending_proc
+    integer :: isd_p, ied_p, jsd_p, jed_p
+    integer :: isg, ieg, jsg, jeg
+    integer :: isc, iec, jsc, jec
+    logical :: process
+    character*255 :: message
+
+    process = .true.
+    if (present(proc_in)) then
+       process = proc_in
+    else
+       process = .true.
+    endif
+
+    call mpp_get_global_domain(Atm(this_grid)%parent_grid%domain, isg, ieg, jsg, jeg)
+    call mpp_get_data_domain(Atm(this_grid)%parent_grid%domain, isd_p, ied_p, jsd_p, jed_p)
+    call mpp_get_compute_domain(Atm(this_grid)%domain, isc, iec, jsc, jec)
+    allocate( g_dat(isg:ieg, jsg:jeg, 1) )
+
+    call timing_on('COMM_TOTAL')
+    sending_proc = Atm(this_grid)%parent_grid%pelist(1) + &
+                   ( Atm(this_grid)%neststruct%parent_tile-tile_fine(Atm(this_grid)%parent_grid%grid_number)+ &
+                     Atm(this_grid)%parent_grid%flagstruct%ntiles-1 )*Atm(this_grid)%parent_grid%npes_per_tile
+   !if (Atm(this_grid)%neststruct%parent_proc .and. Atm(this_grid)%neststruct%parent_tile == Atm(this_grid)%parent_grid%global_tile) then
+    if (Atm(this_grid)%neststruct%parent_tile == Atm(this_grid)%parent_grid%global_tile) then
+      call mpp_global_field(Atm(this_grid)%parent_grid%domain, &
+                            Atm(this_grid)%parent_grid%parent2nest_2d(isd_p:ied_p,jsd_p:jed_p), &
+                            g_dat(isg:,jsg:,1), position=CENTER)
+      if (mpp_pe() == sending_proc) then
+        do p=1,size(Atm(this_grid)%pelist)
+          call mpp_send(g_dat, size(g_dat), Atm(this_grid)%pelist(p))
+        enddo
+      endif
+    endif
+    if (any(Atm(this_grid)%pelist == mpp_pe())) then
+      call mpp_recv(g_dat, size(g_dat), sending_proc)
+    endif
+    call timing_off('COMM_TOTAL')
+    if (process) then
+      call fill_nested_grid(Atm(this_grid)%parent2nest_2d, g_dat(isg:,jsg:,1), &
+                            Atm(this_grid)%neststruct%ind_h, Atm(this_grid)%neststruct%wt_h, &
+                            0, 0, isg, ieg, jsg, jeg, Atm(this_grid)%bd)
+    endif
+
+    call mpp_sync_self
+    deallocate(g_dat)
+
+  end subroutine fill_nested_grid_cpl
 
 end module atmosphere_mod

@@ -35,6 +35,9 @@
            id_dbz, id_maxdbz, id_basedbz, id_dbz4km, id_dbztop, id_dbz_m10C, &
            id_ctz, id_w1km, id_wmaxup, id_wmaxdn, id_cape, id_cin
 
+! Time-dependent lon-lat fields, moving grids:
+ integer :: id_mlon, id_mlat, id_mlont, id_mlatt, id_marea, id_mdx, id_mdy
+
 ! Selected theta-level fields from 3D variables:
  integer :: id_pv350K, id_pv550K
 
@@ -96,6 +99,10 @@
      integer :: id_t_dt_nudge, id_ps_dt_nudge, id_delp_dt_nudge, id_u_dt_nudge, id_v_dt_nudge
 
 ! EMC additions
-     integer :: id_diss, id_zratio, id_hw, id_qvw, id_qlw, id_qiw, id_o3w
-
+     integer :: id_diss, id_zratio, id_hw, id_qvw, id_qlw, id_qiw
+#ifdef MULTI_GASES
+     integer :: id_spo2w, id_spow, id_spo3w
+#else
+     integer :: id_o3w
+#endif
 #endif _FV_DIAG__

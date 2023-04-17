@@ -29,6 +29,8 @@ module fv_arrays_mod
   use horiz_interp_type_mod, only: horiz_interp_type
   use mpp_mod,               only: mpp_broadcast
   use platform_mod,          only: r8_kind
+
+
   public
 
   integer, public, parameter :: R_GRID = r8_kind
@@ -56,7 +58,7 @@ module fv_arrays_mod
      integer :: id_ws, id_te, id_amdt, id_mdt, id_divg, id_aam
      logical :: initialized = .false.
      real  sphum, liq_wat, ice_wat       ! GFDL physics
-     real  rainwat, snowwat, graupel
+     real  rainwat, snowwat, graupel, hailwat
 
      real :: efx(max_step), efx_sum, efx_nest(max_step), efx_sum_nest, mtq(max_step), mtq_sum
      integer :: steps
@@ -87,6 +89,17 @@ module fv_arrays_mod
      real, allocatable, dimension(:,:) :: rdx, rdy
      real, allocatable, dimension(:,:) :: rdxc, rdyc
      real, allocatable, dimension(:,:) :: rdxa, rdya
+
+!  MOLECULAR_DIFFUSION
+     real(kind=R_GRID), allocatable, dimension(:,:) :: area_u_64, area_v_64
+     real(kind=R_GRID), allocatable, dimension(:,:) :: dx6_64, dy6_64
+     real, allocatable, dimension(:,:) ::  area_u,  area_v
+     real, allocatable, dimension(:,:) :: rarea_u, rarea_v
+     real, allocatable, dimension(:,:) ::  dx6,  dy6
+     real, allocatable, dimension(:,:) :: rdx6, rdy6
+     real, allocatable, dimension(:,:) :: sina_6
+     real, allocatable, dimension(:,:) :: delu_6, delv_6
+     real, allocatable, dimension(:,:) :: delu_5, delv_5
 
      ! Scalars:
      real(kind=R_GRID), allocatable :: edge_s(:)
@@ -503,6 +516,7 @@ module fv_arrays_mod
 !-----------------------------------------------------------------------------------------------
 
    logical :: reset_eta = .false.
+   logical :: ignore_rst_cksum = .false. !< enfore (.false.) or override (.true.) data integrity restart checksums
    real    :: p_fac = 0.05  !< Safety factor for minimum nonhydrostatic pressures, which
                             !< will be limited so the full pressure is no less than p_fac
                             !< times the hydrostatic pressure. This is only of concern in mid-top
@@ -671,6 +685,10 @@ module fv_arrays_mod
                               !< original value before entering the physics; a value of 0.7 roughly
                               !< causes the energy fixer to compensate for the amount of energy changed
                               !< by the physics in GFDL HiRAM or AM3.
+   real    :: tau_w = 0.      !< Time scale (in days) for Rayleigh friction applied to vertical winds
+                              !< This option allows the vertical and horizontal winds use different time
+                              !< scales for Rayleigh friction. The default value is 0.0, then tau_w=tau,
+                              !< the same time scale appiled to horizontal and vertical winds.   
    real    :: tau = 0.   !< Time scale (in days) for Rayleigh friction applied to horizontal
                          !< and vertical winds; lost kinetic energy is converted to heat, except
                          !< on nested grids. The default value is 0.0, which disables damping.
@@ -729,6 +747,8 @@ module fv_arrays_mod
                                           !< matches some estimate of observed value. False by default. It
                                           !< is recommended to only set this to .true. when initializing the model.
    logical :: fv_debug  = .false.  !< Whether to turn on additional diagnostics in fv_dynamics.
+                                   !< The default is .false.
+   logical :: fv_timers  = .false. !< Whether to turn on performance metering timers in the dycore and moving nest
                                    !< The default is .false.
    logical :: srf_init  = .false.
    logical :: mountain  = .true.  !< Takes topography into account when initializing the
@@ -863,6 +883,8 @@ module fv_arrays_mod
    logical :: butterfly_effect = .false.   !< Flip the least-significant-bit of the lowest level temperature
                                            !< at the center of the domain (the center of tile 1), if set to .true.
                                            !< The default value is .false.
+   logical :: molecular_diffusion = .false.  !< Apply Whole Atmosphere Model (WAM) molecular diffusion
+                                             !< developed by Henry Juang
 
    real :: dz_min = 2        !< Minimum thickness depth to  to enforce monotonicity of height to prevent blowup.
                              !< 2 by default
@@ -1176,6 +1198,7 @@ module fv_arrays_mod
                ,is_west_uvw  ,ie_west_uvw  ,js_west_uvw  ,je_west_uvw
 
   end type fv_regional_bc_bounds_type
+
   type fv_atmos_type
 
      logical :: allocated = .false.
@@ -1234,6 +1257,9 @@ module fv_arrays_mod
     real, _ALLOCATABLE :: peln(:,:,:)   _NULL  !< ln(pe)
     real, _ALLOCATABLE :: pkz (:,:,:)   _NULL  !< finite-volume mean pk
 
+! For downscaling/remapping a 2d variable from parent to its nest
+    real, _ALLOCATABLE :: parent2nest_2d(:,:) _NULL !< 2d arrary for downscaling a variable from parent to its nest
+
 ! For phys coupling:
     real, _ALLOCATABLE :: u_srf(:,:)    _NULL  !< Surface u-wind
     real, _ALLOCATABLE :: v_srf(:,:)    _NULL  !< Surface v-wind
@@ -1280,6 +1306,7 @@ module fv_arrays_mod
 #if defined(SPMD)
 
      type(domain2D) :: domain_for_coupler !< domain used in coupled model with halo = 1.
+     type(domain2D) :: domain_for_read    !< domain used for reads to increase performance when io_layout=(1,1)
 
      !global tile and tile_of_mosaic only have a meaning for the CURRENT pe
      integer :: num_contact, npes_per_tile, global_tile, tile_of_mosaic, npes_this_grid
@@ -1458,6 +1485,8 @@ contains
     allocate ( Atm%peln(is:ie,npz+1,js:je) )
     allocate (  Atm%pkz(is:ie,js:je,npz) )
 
+    allocate ( Atm%parent2nest_2d(isd:ied,jsd:jed) )
+
     allocate ( Atm%u_srf(is:ie,js:je) )
     allocate ( Atm%v_srf(is:ie,js:je) )
 
@@ -1608,6 +1637,26 @@ contains
     allocate ( Atm%gridstruct% dya(isd_2d:ied_2d  ,jsd_2d:jed_2d  ) )
     allocate ( Atm%gridstruct% dya_64(isd_2d:ied_2d  ,jsd_2d:jed_2d  ) )
     allocate ( Atm%gridstruct%rdya(isd_2d:ied_2d  ,jsd_2d:jed_2d  ) )
+
+    if ( Atm%flagstruct%molecular_diffusion ) then
+        allocate ( Atm%gridstruct% area_u_64(isd_2d:ied_2d  ,jsd_2d:jed_2d+1) )
+        allocate ( Atm%gridstruct% area_v_64(isd_2d:ied_2d+1,jsd_2d:jed_2d  ) )
+        allocate ( Atm%gridstruct% dx6_64(isd_2d:ied_2d+1,jsd_2d:jed_2d+1) )
+        allocate ( Atm%gridstruct% dy6_64(isd_2d:ied_2d+1,jsd_2d:jed_2d+1) )
+        allocate ( Atm%gridstruct% area_u(isd_2d:ied_2d  ,jsd_2d:jed_2d+1) )
+        allocate ( Atm%gridstruct% area_v(isd_2d:ied_2d+1,jsd_2d:jed_2d  ) )
+        allocate ( Atm%gridstruct% dx6(isd_2d:ied_2d+1,jsd_2d:jed_2d+1) )
+        allocate ( Atm%gridstruct% dy6(isd_2d:ied_2d+1,jsd_2d:jed_2d+1) )
+        allocate ( Atm%gridstruct%rarea_u(isd_2d:ied_2d  ,jsd_2d:jed_2d+1) )
+        allocate ( Atm%gridstruct%rarea_v(isd_2d:ied_2d+1,jsd_2d:jed_2d  ) )
+        allocate ( Atm%gridstruct%rdx6(isd_2d:ied_2d+1,jsd_2d:jed_2d+1) )
+        allocate ( Atm%gridstruct%rdy6(isd_2d:ied_2d+1,jsd_2d:jed_2d+1) )
+        allocate ( Atm%gridstruct%sina_6(isd_2d:ied_2d,jsd_2d:jed_2d) )
+        allocate ( Atm%gridstruct%delu_6(isd_2d:ied_2d,jsd_2d:jed_2d) )
+        allocate ( Atm%gridstruct%delv_6(isd_2d:ied_2d,jsd_2d:jed_2d) )
+        allocate ( Atm%gridstruct%delu_5(isd_2d:ied_2d,jsd_2d:jed_2d) )
+        allocate ( Atm%gridstruct%delv_5(isd_2d:ied_2d,jsd_2d:jed_2d) )
+    endif
 
     allocate ( Atm%gridstruct%grid (isd_2d:ied_2d+1,jsd_2d:jed_2d+1,1:ndims_2d) )
     allocate ( Atm%gridstruct%grid_64 (isd_2d:ied_2d+1,jsd_2d:jed_2d+1,1:ndims_2d) )
@@ -1827,6 +1876,8 @@ contains
     deallocate ( Atm%inline_mp%pres )
     deallocate ( Atm%inline_mp%preg )
 
+    deallocate ( Atm%parent2nest_2d )
+
     deallocate ( Atm%u_srf )
     deallocate ( Atm%v_srf )
     if( Atm%flagstruct%fv_land ) deallocate ( Atm%sgh )
@@ -1857,6 +1908,22 @@ contains
     deallocate ( Atm%gridstruct%rdxa )
     deallocate ( Atm%gridstruct% dya )
     deallocate ( Atm%gridstruct%rdya )
+
+    if ( Atm%flagstruct%molecular_diffusion ) then
+       deallocate ( Atm%gridstruct% area_u )
+       deallocate ( Atm%gridstruct% area_v )
+       deallocate ( Atm%gridstruct%rarea_u )
+       deallocate ( Atm%gridstruct%rarea_v )
+       deallocate ( Atm%gridstruct% dx6 )
+       deallocate ( Atm%gridstruct% dy6 )
+       deallocate ( Atm%gridstruct%rdx6 )
+       deallocate ( Atm%gridstruct%rdy6 )
+       deallocate ( Atm%gridstruct%sina_6 )
+       deallocate ( Atm%gridstruct%delu_6 )
+       deallocate ( Atm%gridstruct%delv_6 )
+       deallocate ( Atm%gridstruct%delu_5 )
+       deallocate ( Atm%gridstruct%delv_5 )
+    endif
 
     deallocate ( Atm%gridstruct%grid  )
     deallocate ( Atm%gridstruct%agrid )
@@ -2119,12 +2186,14 @@ subroutine deallocate_fv_nest_BC_type_3d(BC)
 
   type(fv_nest_BC_type_3d) :: BC
 
-  if (.not. BC%allocated) return
+ !if (.not. BC%allocated) return
 
+  if (allocated(BC%north_t1)) then  ! Added WDR
      deallocate(BC%north_t1)
      deallocate(BC%south_t1)
      deallocate(BC%west_t1)
      deallocate(BC%east_t1)
+     endif ! Added WDR
 
   if (allocated(BC%north_t0)) then
      deallocate(BC%north_t0)
@@ -2136,6 +2205,5 @@ subroutine deallocate_fv_nest_BC_type_3d(BC)
   BC%allocated = .false.
 
 end subroutine deallocate_fv_nest_BC_type_3d
-
 
 end module fv_arrays_mod
